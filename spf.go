@@ -51,15 +51,7 @@ const (
 	ResultPermError Result = "permerror"
 )
 
-var discardLogger = slog.New(discardHandler{})
-
-// discardHandler drops every record, like slog.DiscardHandler of Go 1.24.
-type discardHandler struct{}
-
-func (discardHandler) Enabled(context.Context, slog.Level) bool  { return false }
-func (discardHandler) Handle(context.Context, slog.Record) error { return nil }
-func (h discardHandler) WithAttrs([]slog.Attr) slog.Handler      { return h }
-func (h discardHandler) WithGroup(string) slog.Handler           { return h }
+var discardLogger = slog.New(slog.DiscardHandler)
 
 // NewVerifier creates a new SPF Verifier
 // sender is the email address of the sender (we don't check if it's valid)

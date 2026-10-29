@@ -4,7 +4,7 @@
   [RFC 7208 test suite](testdata/openspf-rfc7208-tests.yml)
 - Checks both the MAIL FROM and HELO identities, with `exp=` explanations
   and `Received-SPF` headers
-- Supports Go 1.22+
+- Supports Go 1.24+
 
 ## Usage
 
