@@ -23,10 +23,10 @@ type Outcome struct {
 
 	// Sender is the <sender> checked, e.g. "postmaster@" + Helo for IdentityHelo.
 	Sender   string
-	MailFrom string // MAIL FROM as given to NewVerifier
+	MailFrom string // MAIL FROM as given to CheckMailFrom, empty for CheckHelo
 	ClientIP netip.Addr
 	Helo     string
-	Receiver string // as given to SetReceiver
+	Receiver string // Checker.Receiver
 
 	// Mechanism is the directive that produced the result, empty if none matched.
 	Mechanism string
@@ -65,7 +65,10 @@ func (o *Outcome) ReceivedSPF() string {
 		pair("receiver", o.Receiver)
 	}
 	pair("client-ip", o.ClientIP.String())
-	pair("envelope-from", o.MailFrom)
+	// a HELO check may happen before MAIL FROM is known
+	if o.Identity == IdentityMailFrom || o.MailFrom != "" {
+		pair("envelope-from", o.MailFrom)
+	}
 	if o.Helo != "" {
 		pair("helo", o.Helo)
 	}

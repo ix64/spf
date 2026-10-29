@@ -1,33 +1,51 @@
 package spf
 
 import (
-	"fmt"
+	"errors"
 )
 
-// CheckError is an error type for mechanisms checking failures.
-// If it returns an exception, mechanism processing ends and the exception value is returned.
-// If it matches, processing ends and the qualifier value is returned as the result of that record.
-// If it does not match, processing continues with the next mechanism.
-type CheckError struct {
-	result   Result
-	message  string
-	internal error
+// Errors behind a ResultPermError, for use with errors.Is on Outcome.Problem.
+// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.6.4
+var (
+	// ErrTooManyLookups means more than the lookup limit of terms causing DNS lookups.
+	ErrTooManyLookups = errors.New("spf: too many DNS lookups")
+	// ErrTooManyVoidLookups means more than two DNS lookups returned no records.
+	ErrTooManyVoidLookups = errors.New("spf: too many void DNS lookups")
+	// ErrTooManyMX means a "mx" mechanism found more than 10 MX records.
+	ErrTooManyMX = errors.New("spf: too many MX records")
+	// ErrMultipleRecords means a domain published more than one SPF record.
+	// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.5
+	ErrMultipleRecords = errors.New("spf: multiple SPF records")
+)
+
+// checkError carries the result that a failure during the check leads to.
+// If it's returned while processing a mechanism, processing ends and the
+// result is returned.
+type checkError struct {
+	result  Result
+	message string
+	err     error
 }
 
-func NewCheckError(result Result, message string) *CheckError {
-	return &CheckError{result: result, message: message}
+func newCheckError(result Result, message string) *checkError {
+	return &checkError{result: result, message: message}
 }
-func WrapCheckError(err error, result Result, message string) *CheckError {
-	return &CheckError{result: result, message: message, internal: err}
+
+func wrapCheckError(err error, result Result, message string) *checkError {
+	return &checkError{result: result, message: message, err: err}
 }
-func (e *CheckError) Error() string {
-	if e.internal == nil {
-		return fmt.Sprintf("spf(%s): %s", e.result, e.message)
-	} else {
-		return fmt.Sprintf("spf(%s): %s: %s", e.result, e.message, e.internal.Error())
+
+func (e *checkError) Error() string {
+	switch {
+	case e.err == nil:
+		return e.message
+	case e.message == "":
+		return e.err.Error()
+	default:
+		return e.message + ": " + e.err.Error()
 	}
 }
 
-func (e *CheckError) Unwrap() error {
-	return e.internal
+func (e *checkError) Unwrap() error {
+	return e.err
 }

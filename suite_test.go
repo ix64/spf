@@ -183,7 +183,7 @@ func loadTestSuites(path string) ([]testSuite, error) {
 	return suites, nil
 }
 
-func TestVerifier_Test(t *testing.T) {
+func TestChecker_TestSuite(t *testing.T) {
 	suites, err := loadTestSuites("testdata/openspf-rfc7208-tests.yml")
 	if err != nil {
 		t.Fatalf("Failed to load test suites: %s", err)
@@ -196,9 +196,8 @@ func TestVerifier_Test(t *testing.T) {
 			}
 			for tName, tt := range suite.Tests {
 				t.Run(tName, func(t *testing.T) {
-					v := NewVerifier(tt.MailFrom, netip.MustParseAddr(tt.Host), tt.Helo)
-					v.SetResolver(lowerCaseResolver{r})
-					o := v.Check(context.TODO())
+					c := &Checker{Resolver: lowerCaseResolver{r}}
+					o := c.CheckMailFrom(context.TODO(), netip.MustParseAddr(tt.Host), tt.MailFrom, tt.Helo)
 					got, err := o.Result, o.Problem
 
 					isOneOfExpect := false
@@ -248,19 +247,19 @@ func TestVerifier_Test(t *testing.T) {
 // lowerCaseResolver makes lookups case-insensitive like DNS,
 // for zone data with lower-cased names.
 type lowerCaseResolver struct {
-	DNSResolver
+	Resolver
 }
 
 func (r lowerCaseResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
-	return r.DNSResolver.LookupTXT(ctx, strings.ToLower(name))
+	return r.Resolver.LookupTXT(ctx, strings.ToLower(name))
 }
 
 func (r lowerCaseResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
-	return r.DNSResolver.LookupNetIP(ctx, network, strings.ToLower(host))
+	return r.Resolver.LookupNetIP(ctx, network, strings.ToLower(host))
 }
 
 func (r lowerCaseResolver) LookupMX(ctx context.Context, name string) ([]*net.MX, error) {
-	return r.DNSResolver.LookupMX(ctx, strings.ToLower(name))
+	return r.Resolver.LookupMX(ctx, strings.ToLower(name))
 }
 
 func loadMockResolver(zf string) (*mockdns.Resolver, error) {
@@ -326,7 +325,7 @@ type SPFTestCase struct {
 	want        Result
 }
 
-func TestVerifier_RFC7208Appendix1(t *testing.T) {
+func TestChecker_RFC7208Appendix1(t *testing.T) {
 
 	var cases = []struct {
 		spf  string //published records for example.com
@@ -370,10 +369,9 @@ func TestVerifier_RFC7208Appendix1(t *testing.T) {
 			}
 			addMockSPFRecord(resolver, "example.com", s.spf)
 
-			v := NewVerifier("test@example.com", netip.MustParseAddr(s.ip), "example.net")
-			v.SetResolver(resolver)
-
-			got, err := v.Test(context.TODO())
+			c := &Checker{Resolver: resolver}
+			o := c.CheckMailFrom(context.TODO(), netip.MustParseAddr(s.ip), "test@example.com", "example.net")
+			got, err := o.Result, o.Problem
 			if got != s.want {
 				t.Errorf("incorrect result, want=%s, got=%s", s.want, got)
 				t.Error(err)
@@ -382,7 +380,7 @@ func TestVerifier_RFC7208Appendix1(t *testing.T) {
 	}
 }
 
-func TestVerifier_RFC7208Appendix2(t *testing.T) {
+func TestChecker_RFC7208Appendix2(t *testing.T) {
 	resolver, err := loadMockResolver("./testdata/rfc7208-appendix-a1.zone")
 	if err != nil {
 		t.Error(err)
@@ -393,10 +391,9 @@ func TestVerifier_RFC7208Appendix2(t *testing.T) {
 	addMockSPFRecord(resolver, "la.example.org", "v=spf1 redirect=example.org")
 
 	ip := netip.MustParseAddr("192.0.2.129")
-	v := NewVerifier("test@la.example.org", ip, "example.net")
-	v.SetResolver(resolver)
-
-	got, err := v.Test(context.TODO())
+	c := &Checker{Resolver: resolver}
+	o := c.CheckMailFrom(context.TODO(), ip, "test@la.example.org", "example.net")
+	got, err := o.Result, o.Problem
 	want := ResultPass
 	if got != want {
 		t.Errorf("incorrect result, want=%s, got=%s", want, got)
@@ -404,7 +401,7 @@ func TestVerifier_RFC7208Appendix2(t *testing.T) {
 	}
 
 }
-func TestVerifier_RFC7208Appendix3(t *testing.T) {
+func TestChecker_RFC7208Appendix3(t *testing.T) {
 	resolver, err := loadMockResolver("./testdata/rfc7208-appendix-a3.zone")
 	if err != nil {
 		t.Error(err)
@@ -419,9 +416,9 @@ func TestVerifier_RFC7208Appendix3(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.sender, func(t *testing.T) {
-			v := NewVerifier(tt.sender, tt.ip, tt.helloDomain)
-			v.SetResolver(resolver)
-			got, err := v.Test(context.TODO())
+			c := &Checker{Resolver: resolver}
+			o := c.CheckMailFrom(context.TODO(), tt.ip, tt.sender, tt.helloDomain)
+			got, err := o.Result, o.Problem
 			if got != tt.want {
 				t.Errorf("incorrect result, want=%s, got=%s", tt.want, got)
 				t.Error(err)
@@ -432,7 +429,7 @@ func TestVerifier_RFC7208Appendix3(t *testing.T) {
 
 }
 
-func TestVerifier_RFC7208Appendix4(t *testing.T) {
+func TestChecker_RFC7208Appendix4(t *testing.T) {
 	resolver, err := loadMockResolver("./testdata/rfc7208-appendix-a3.zone")
 	if err != nil {
 		t.Error(err)
@@ -450,9 +447,9 @@ func TestVerifier_RFC7208Appendix4(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.sender, func(t *testing.T) {
-			v := NewVerifier(tt.sender, tt.ip, tt.helloDomain)
-			v.SetResolver(resolver)
-			got, err := v.Test(context.TODO())
+			c := &Checker{Resolver: resolver}
+			o := c.CheckMailFrom(context.TODO(), tt.ip, tt.sender, tt.helloDomain)
+			got, err := o.Result, o.Problem
 			if got != tt.want {
 				t.Errorf("incorrect result, want=%s, got=%s", tt.want, got)
 				t.Error(err)

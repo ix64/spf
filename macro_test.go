@@ -29,12 +29,14 @@ func Test_formatIPDotNotation(t *testing.T) {
 }
 
 func TestMacroString_expand(t *testing.T) {
-	v4 := NewVerifier(
+	v4 := newTestCheck(
+		&Checker{},
 		"strong-bad@email.example.com",
 		netip.MustParseAddr("192.0.2.3"),
 		"another.example.com",
 	).env("email.example.com")
-	v6 := NewVerifier(
+	v6 := newTestCheck(
+		&Checker{},
 		"strong-bad@email.example.com",
 		netip.MustParseAddr("2001:db8::cb01"),
 		"another.example.com",
@@ -141,7 +143,8 @@ func Test_parseDomainSpec(t *testing.T) {
 }
 
 func TestMacroString_expandDomain_truncate(t *testing.T) {
-	env := NewVerifier(
+	env := newTestCheck(
+		&Checker{},
 		"user@"+strings.Repeat("a", 60)+".example.com",
 		netip.MustParseAddr("192.0.2.3"),
 		"example.net",

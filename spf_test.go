@@ -2,15 +2,18 @@ package spf
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/foxcpp/go-mockdns"
 )
 
-func TestVerifier_checkMechanismMX(t *testing.T) {
+func TestEvaluation_matchMX(t *testing.T) {
 	resolver := &mockdns.Resolver{Zones: map[string]mockdns.Zone{
 		"example.com.": {
 			MX: []net.MX{{Host: "mx.example.com", Pref: 5}},
@@ -49,14 +52,13 @@ func TestVerifier_checkMechanismMX(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.stmt, func(t *testing.T) {
-			s := NewVerifier(tt.sender, netip.MustParseAddr(tt.ip), tt.helloDomain)
-			s.SetResolver(resolver)
+			ch := newTestCheck(&Checker{Resolver: resolver}, tt.sender, netip.MustParseAddr(tt.ip), tt.helloDomain)
 			rec, err := Parse("v=spf1 " + tt.stmt)
 			if err != nil {
 				t.Fatal(err)
 			}
-			e := &evaluation{Verifier: s, ctx: context.TODO()}
-			matched, err := e.match(rec.Directives[0].Mechanism, s.env(s.senderDomain))
+			e := &evaluation{check: ch, ctx: context.TODO()}
+			matched, err := e.match(rec.Directives[0].Mechanism, ch.env(ch.senderDomain))
 			if (err != nil) != tt.wantErr {
 				t.Errorf("match() err = %v, want = %v", err, tt.wantErr)
 			}
@@ -66,6 +68,12 @@ func TestVerifier_checkMechanismMX(t *testing.T) {
 		})
 	}
 
+}
+
+// newTestCheck returns the check of the MAIL FROM identity.
+func newTestCheck(c *Checker, mailFrom string, ip netip.Addr, helo string) *check {
+	local, domain := splitSender(mailFrom, helo)
+	return c.newCheck(ip, mailFrom, helo, local, domain)
 }
 
 func Test_splitSender(t *testing.T) {
@@ -92,7 +100,7 @@ func Test_splitSender(t *testing.T) {
 }
 
 // sender without local-part must not panic when %{l} is expanded
-func TestVerifier_senderWithoutLocalPart(t *testing.T) {
+func TestChecker_senderWithoutLocalPart(t *testing.T) {
 	resolver := &mockdns.Resolver{Zones: map[string]mockdns.Zone{
 		"example.com.": {
 			TXT: []string{"v=spf1 exists:%{l}.%{d} -all"},
@@ -103,9 +111,9 @@ func TestVerifier_senderWithoutLocalPart(t *testing.T) {
 	}}
 	for _, sender := range []string{"example.com", "@example.com"} {
 		t.Run(sender, func(t *testing.T) {
-			v := NewVerifier(sender, netip.MustParseAddr("192.0.2.1"), "helo.example.net")
-			v.SetResolver(resolver)
-			got, err := v.Test(context.TODO())
+			c := &Checker{Resolver: resolver}
+			o := c.CheckMailFrom(context.TODO(), netip.MustParseAddr("192.0.2.1"), sender, "helo.example.net")
+			got, err := o.Result, o.Problem
 			if got != ResultPass {
 				t.Errorf("incorrect result, want=%s, got=%s, err=%v", ResultPass, got, err)
 			}
@@ -114,23 +122,30 @@ func TestVerifier_senderWithoutLocalPart(t *testing.T) {
 }
 
 // lookups are counted per check, so a resolver can be shared between checks
-func TestVerifier_sharedResolver(t *testing.T) {
+// a Checker counts lookups per check, so it can be shared by concurrent checks
+func TestChecker_shared(t *testing.T) {
 	resolver := &mockdns.Resolver{Zones: map[string]mockdns.Zone{
 		"example.com.": {
 			TXT: []string{"v=spf1 a a a a a a a a a a -all"},
 			A:   []string{"192.0.2.1"},
 		},
 	}}
-	for i := 0; i < 5; i++ {
-		v := NewVerifier("test@example.com", netip.MustParseAddr("192.0.2.1"), "example.net")
-		v.SetResolver(resolver)
-		if got, err := v.Test(context.TODO()); got != ResultPass {
-			t.Fatalf("check %d: incorrect result, want=%s, got=%s, err=%v", i, ResultPass, got, err)
-		}
+	c := &Checker{Resolver: resolver}
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			o := c.CheckMailFrom(context.TODO(), netip.MustParseAddr("192.0.2.1"), "test@example.com", "example.net")
+			if o.Result != ResultPass {
+				t.Errorf("check %d: incorrect result, want=%s, got=%s, err=%v", i, ResultPass, o.Result, o.Problem)
+			}
+		}()
 	}
+	wg.Wait()
 }
 
-func TestVerifier_SetLookupLimit(t *testing.T) {
+func TestChecker_LookupLimit(t *testing.T) {
 	resolver := &mockdns.Resolver{Zones: map[string]mockdns.Zone{
 		"example.com.": {
 			TXT: []string{"v=spf1 a:a.example.com a:b.example.com ip4:192.0.2.1 -all"},
@@ -147,12 +162,67 @@ func TestVerifier_SetLookupLimit(t *testing.T) {
 		{0, ResultPass}, // default
 	}
 	for _, tt := range tests {
-		v := NewVerifier("test@example.com", netip.MustParseAddr("192.0.2.1"), "example.net")
-		v.SetResolver(resolver)
-		v.SetLookupLimit(tt.limit)
-		if got, err := v.Test(context.TODO()); got != tt.want {
+		c := &Checker{Resolver: resolver, LookupLimit: tt.limit}
+		o := c.CheckMailFrom(context.TODO(), netip.MustParseAddr("192.0.2.1"), "test@example.com", "example.net")
+		if got, err := o.Result, o.Problem; got != tt.want {
 			t.Errorf("limit %d: incorrect result, want=%s, got=%s, err=%v", tt.limit, tt.want, got, err)
 		}
+		if tt.want == ResultPermError && !errors.Is(o.Problem, ErrTooManyLookups) {
+			t.Errorf("limit %d: problem = %v, want ErrTooManyLookups", tt.limit, o.Problem)
+		}
+	}
+}
+
+// blockingResolver answers TXT lookups only when the context is done.
+type blockingResolver struct {
+	Resolver
+}
+
+func (blockingResolver) LookupTXT(ctx context.Context, _ string) ([]string, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestChecker_problems(t *testing.T) {
+	mx := make([]net.MX, 11)
+	for i := range mx {
+		mx[i] = net.MX{Host: "mx.example.com", Pref: uint16(i)}
+	}
+	resolver := &mockdns.Resolver{Zones: map[string]mockdns.Zone{
+		"multiple.example.com.": {TXT: []string{"v=spf1 -all", "v=spf1 +all"}},
+		"void.example.com.":     {TXT: []string{"v=spf1 a:x1.example.com a:x2.example.com a:x3.example.com -all"}},
+		"mx.example.com.":       {TXT: []string{"v=spf1 mx -all"}, MX: mx, A: []string{"192.0.2.10"}},
+	}}
+	tests := []struct {
+		domain   string
+		resolver Resolver
+		result   Result
+		problem  error
+	}{
+		{"multiple.example.com", resolver, ResultPermError, ErrMultipleRecords},
+		{"void.example.com", resolver, ResultPermError, ErrTooManyVoidLookups},
+		{"mx.example.com", resolver, ResultPermError, ErrTooManyMX},
+		{"timeout.example.com", blockingResolver{}, ResultTempError, context.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.domain, func(t *testing.T) {
+			c := &Checker{Resolver: tt.resolver, Timeout: 10 * time.Millisecond}
+			o := c.CheckMailFrom(context.TODO(), netip.MustParseAddr("192.0.2.1"), "user@"+tt.domain, "example.net")
+			if o.Result != tt.result || !errors.Is(o.Problem, tt.problem) {
+				t.Errorf("CheckMailFrom() = (%s, %v), want (%s, %v)", o.Result, o.Problem, tt.result, tt.problem)
+			}
+		})
+	}
+}
+
+// the package functions use the zero Checker; a malformed domain needs no DNS lookups
+func TestCheckMailFrom(t *testing.T) {
+	ip := netip.MustParseAddr("192.0.2.1")
+	if o := CheckMailFrom(context.TODO(), ip, "user@localhost", "localhost"); o.Result != ResultNone {
+		t.Errorf("CheckMailFrom() = %s, want %s, problem: %v", o.Result, ResultNone, o.Problem)
+	}
+	if o := CheckHelo(context.TODO(), ip, "[192.0.2.1]"); o.Result != ResultNone || o.Identity != IdentityHelo {
+		t.Errorf("CheckHelo() = %s %s, want %s %s", o.Result, o.Identity, ResultNone, IdentityHelo)
 	}
 }
 

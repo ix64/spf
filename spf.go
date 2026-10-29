@@ -53,27 +53,66 @@ const (
 
 var discardLogger = slog.New(slog.DiscardHandler)
 
-// NewVerifier creates a new SPF Verifier
-// sender is the email address of the sender (we don't check if it's valid)
-// ip is the remote IP address of current connection
-// helloDomain is the domain of the SMTP HELO/EHLO command
-func NewVerifier(sender string, ip netip.Addr, helloDomain string) *Verifier {
-	senderLocal, senderDomain := splitSender(sender, helloDomain)
-	s := &Verifier{
-		mailFrom:     sender,
-		sender:       senderLocal + "@" + senderDomain,
-		senderLocal:  senderLocal,
-		senderDomain: senderDomain,
-		// IPv4-mapped IPv6 addresses are treated as IPv4
-		// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-5
-		ip:          ip.Unmap(),
-		helloDomain: helloDomain,
-		logger:      discardLogger,
-		timeout:     defaultSPFTimeout,
-		lookupLimit: defaultMaxLookups,
-	}
-	s.SetResolver(net.DefaultResolver)
-	return s
+// Checker checks SPF policies. The zero value is ready to use with the
+// system resolver. A Checker is safe for concurrent use, but must not be
+// modified while checks are running.
+type Checker struct {
+	// Resolver looks up DNS records, net.DefaultResolver if nil.
+	Resolver Resolver
+
+	// Receiver is the domain name of the host performing the check,
+	// used for the %{r} macro and in Received-SPF headers.
+	Receiver string
+
+	// LookupLimit is the number of terms causing DNS lookups ("include", "a",
+	// "mx", "ptr", "exists" and "redirect") allowed in one check, 10 if <= 0.
+	// Exceeding it gives ResultPermError with ErrTooManyLookups.
+	// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.6.4
+	LookupLimit int
+
+	// Timeout limits each check, 20 seconds if <= 0.
+	// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.6.4
+	Timeout time.Duration
+
+	// Logger logs the steps of each check at debug level, nothing is logged if nil.
+	Logger *slog.Logger
+}
+
+const (
+	defaultMaxLookups = 10
+	defaultTimeout    = 20 * time.Second
+)
+
+var defaultChecker Checker
+
+// CheckMailFrom checks the MAIL FROM identity with the zero Checker.
+// See Checker.CheckMailFrom.
+func CheckMailFrom(ctx context.Context, ip netip.Addr, mailFrom, helo string) *Outcome {
+	return defaultChecker.CheckMailFrom(ctx, ip, mailFrom, helo)
+}
+
+// CheckHelo checks the HELO identity with the zero Checker.
+// See Checker.CheckHelo.
+func CheckHelo(ctx context.Context, ip netip.Addr, helo string) *Outcome {
+	return defaultChecker.CheckHelo(ctx, ip, helo)
+}
+
+// CheckMailFrom checks the MAIL FROM identity of a message from ip.
+// mailFrom is the MAIL FROM reverse-path without angle brackets; when it's
+// empty, "postmaster@" + helo is checked. helo is the domain of the
+// HELO/EHLO command.
+// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-2.4
+func (c *Checker) CheckMailFrom(ctx context.Context, ip netip.Addr, mailFrom, helo string) *Outcome {
+	local, domain := splitSender(mailFrom, helo)
+	return c.newCheck(ip, mailFrom, helo, local, domain).run(ctx, IdentityMailFrom)
+}
+
+// CheckHelo checks the HELO identity, i.e. "postmaster@" + helo, which is
+// recommended before checking MAIL FROM; a "pass" for HELO may make the
+// MAIL FROM check unnecessary. A HELO with an address literal gives ResultNone.
+// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-2.3
+func (c *Checker) CheckHelo(ctx context.Context, ip netip.Addr, helo string) *Outcome {
+	return c.newCheck(ip, "", helo, "postmaster", helo).run(ctx, IdentityHelo)
 }
 
 // splitSender splits sender into local-part and domain.
@@ -95,123 +134,83 @@ func splitSender(sender, helloDomain string) (local, domain string) {
 	return local, domain
 }
 
-// Verifier for SPF Version 1.
-// A Verifier is not modified by checks, so it can be used by several goroutines
-// once it's configured.
-type Verifier struct {
-	mailFrom     string // sender as given
-	sender       string // normalized as local-part@domain
-	senderLocal  string // local-part of sender
-	senderDomain string // domain of sender
+// check holds the inputs and settings of a single check.
+type check struct {
+	mailFrom     string // MAIL FROM as given
+	sender       string // <sender> as local-part@domain
+	senderLocal  string // local-part of <sender>
+	senderDomain string // domain of <sender>
 	ip           netip.Addr
 	helloDomain  string
 
-	resolver    DNSResolver
+	resolver    Resolver
+	receiver    string
+	lookupLimit int
 	timeout     time.Duration
 	logger      *slog.Logger
-	lookupLimit int
-	receiver    string
 }
 
-func (s *Verifier) SetResolver(resolver DNSResolver) {
-	s.resolver = resolver
-}
-
-// defaultMaxLookups is the number of terms causing DNS lookups during SPF evaluation
-// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.6.4
-const defaultMaxLookups = 10
-
-// SetLookupLimit sets the number of terms causing DNS lookups
-// ("include", "a", "mx", "ptr", "exists" and "redirect") allowed in one check.
-// If this limit is exceeded the result is ResultPermError.
-// A limit <= 0 restores the default of 10.
-func (s *Verifier) SetLookupLimit(limit int) {
-	if limit <= 0 {
-		limit = defaultMaxLookups
+func (c *Checker) newCheck(ip netip.Addr, mailFrom, helo, senderLocal, senderDomain string) *check {
+	ch := &check{
+		mailFrom:     mailFrom,
+		sender:       senderLocal + "@" + senderDomain,
+		senderLocal:  senderLocal,
+		senderDomain: senderDomain,
+		// IPv4-mapped IPv6 addresses are treated as IPv4
+		// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-5
+		ip:          ip.Unmap(),
+		helloDomain: helo,
+		resolver:    c.Resolver,
+		receiver:    c.Receiver,
+		lookupLimit: c.LookupLimit,
+		timeout:     c.Timeout,
+		logger:      c.Logger,
 	}
-	s.lookupLimit = limit
-}
-
-// SetLogger sets the logger for the steps of each check, logged at debug level.
-// A nil logger disables logging, which is the default.
-func (s *Verifier) SetLogger(logger *slog.Logger) {
-	if logger == nil {
-		logger = discardLogger
+	if ch.resolver == nil {
+		ch.resolver = net.DefaultResolver
 	}
-	s.logger = logger
-}
-
-const defaultSPFTimeout = time.Second * 20
-
-func (s *Verifier) SetTimeout(t time.Duration) {
-	s.timeout = t
-}
-
-// SetReceiver sets the domain name of the host performing the check,
-// used for the %{r} macro and in Received-SPF headers.
-func (s *Verifier) SetReceiver(receiver string) {
-	s.receiver = receiver
-}
-
-// Test checks the MAIL FROM identity, returning the result and the problem
-// behind ResultTempError or ResultPermError. Use Check for the full Outcome.
-func (s *Verifier) Test(ctx context.Context) (Result, error) {
-	o := s.Check(ctx)
-	return o.Result, o.Problem
-}
-
-// Check checks the MAIL FROM identity.
-// When the MAIL FROM is empty, this checks "postmaster@" + helloDomain.
-// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-2.4
-func (s *Verifier) Check(ctx context.Context) *Outcome {
-	return s.check(ctx, IdentityMailFrom)
-}
-
-// CheckHelo checks the HELO identity, which is recommended before checking
-// MAIL FROM; a "pass" for HELO may make the MAIL FROM check unnecessary.
-// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-2.3
-func (s *Verifier) CheckHelo(ctx context.Context) *Outcome {
-	return s.check(ctx, IdentityHelo)
-}
-
-func (s *Verifier) check(ctx context.Context, identity Identity) *Outcome {
-	v := s
-	if identity == IdentityHelo {
-		helo := *s
-		helo.senderLocal, helo.senderDomain = "postmaster", s.helloDomain
-		helo.sender = helo.senderLocal + "@" + helo.senderDomain
-		v = &helo
+	if ch.lookupLimit <= 0 {
+		ch.lookupLimit = defaultMaxLookups
 	}
+	if ch.timeout <= 0 {
+		ch.timeout = defaultTimeout
+	}
+	if ch.logger == nil {
+		ch.logger = discardLogger
+	}
+	return ch
+}
 
+func (ch *check) run(ctx context.Context, identity Identity) *Outcome {
 	o := &Outcome{
 		Result:   ResultNone,
 		Identity: identity,
-		Sender:   v.sender,
-		MailFrom: s.mailFrom,
-		ClientIP: s.ip,
-		Helo:     s.helloDomain,
-		Receiver: s.receiver,
+		Sender:   ch.sender,
+		MailFrom: ch.mailFrom,
+		ClientIP: ch.ip,
+		Helo:     ch.helloDomain,
+		Receiver: ch.receiver,
 	}
 	// a HELO with an address literal is not a valid domain either
-	if !isValidDomain(v.senderDomain) {
-		s.logResult(ctx, o)
+	if !isValidDomain(ch.senderDomain) {
+		ch.logResult(ctx, o)
 		return o
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	ctx, cancel := context.WithTimeout(ctx, ch.timeout)
 	defer cancel()
-	e := &evaluation{Verifier: v, ctx: ctx}
-	o.Result, o.Problem = e.checkHost(v.senderDomain)
+	e := &evaluation{check: ch, ctx: ctx}
+	o.Result, o.Problem = e.checkHost(ch.senderDomain)
 	o.Mechanism = e.mechanism
 	if o.Result == ResultFail {
 		o.Explanation = e.explanation
 	}
-	s.logResult(ctx, o)
+	ch.logResult(ctx, o)
 	return o
 }
 
-func (s *Verifier) logResult(ctx context.Context, o *Outcome) {
-	s.logger.DebugContext(ctx, "spf: result",
+func (ch *check) logResult(ctx context.Context, o *Outcome) {
+	ch.logger.DebugContext(ctx, "spf: result",
 		"identity", string(o.Identity), "sender", o.Sender, "ip", o.ClientIP.String(),
 		"result", string(o.Result), "mechanism", o.Mechanism, errAttr(o.Problem))
 }
@@ -237,15 +236,15 @@ func isValidDomain(domain string) bool {
 }
 
 // env returns the macro values while checking domain.
-func (s *Verifier) env(domain string) *macroEnv {
+func (ch *check) env(domain string) *macroEnv {
 	return &macroEnv{
-		sender:       s.sender,
-		senderLocal:  s.senderLocal,
-		senderDomain: s.senderDomain,
+		sender:       ch.sender,
+		senderLocal:  ch.senderLocal,
+		senderDomain: ch.senderDomain,
 		domain:       domain,
-		ip:           s.ip,
-		helloDomain:  s.helloDomain,
-		receiver:     s.receiver,
+		ip:           ch.ip,
+		helloDomain:  ch.helloDomain,
+		receiver:     ch.receiver,
 		now:          time.Now(),
 	}
 }
