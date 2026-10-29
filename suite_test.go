@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -17,8 +18,18 @@ import (
 
 type testSuite struct {
 	Description string                    `yaml:"description"`
+	Comment     string                    `yaml:"comment"`
 	Tests       map[string]testCase       `yaml:"tests"`
 	ZoneData    map[string]testZoneRecord `yaml:"zonedata"`
+}
+
+// name returns the description, or the first line of the comment.
+func (s *testSuite) name() string {
+	if s.Description != "" {
+		return s.Description
+	}
+	first, _, _ := strings.Cut(strings.TrimSpace(s.Comment), "\n")
+	return first
 }
 
 type testCase struct {
@@ -137,7 +148,7 @@ func (t *testZoneRecord) fillByMap(m map[interface{}]interface{}) error {
 		case "PTR":
 			t.PTR = append(t.PTR, str)
 		case "CNAME":
-			t.CNAME = str
+			t.CNAME = strings.ToLower(dns.Fqdn(str))
 		default:
 			return fmt.Errorf("unknown key %s", k)
 		}
@@ -183,65 +194,89 @@ func loadTestSuites(path string) ([]testSuite, error) {
 	return suites, nil
 }
 
+// testSuiteFiles are the test suites in testdata, with the cases each one skips
+// (test name: reason). A skipped case that passes fails the test, so that the
+// list stays accurate.
+var testSuiteFiles = []struct {
+	file string
+	skip map[string]string
+}{
+	// the RFC 7208 test suite of the OpenSPF project, as maintained by pyspf
+	{"testdata/pyspf-rfc7208-tests.yml", nil},
+	// ad hoc tests of pyspf, from bug reports
+	{"testdata/pyspf-tests.yml", map[string]string{
+		// RFC 7208 section 6 requires ignoring unknown modifiers, see
+		// "default-modifier-obsolete" in the RFC 7208 test suite
+		"default-modifier":       `pyspf compatibility with the "default" modifier of SPF drafts`,
+		"default-modifier-harsh": `pyspf compatibility with the "default" modifier of SPF drafts`,
+	}},
+}
+
 func TestChecker_TestSuite(t *testing.T) {
-	suites, err := loadTestSuites("testdata/openspf-rfc7208-tests.yml")
-	if err != nil {
-		t.Fatalf("Failed to load test suites: %s", err)
-	}
-	for _, suite := range suites {
-		t.Run(suite.Description, func(t *testing.T) {
-			r := &mockdns.Resolver{Zones: make(map[string]mockdns.Zone)}
-			for s, record := range suite.ZoneData {
-				r.Zones[strings.ToLower(dns.Fqdn(s))] = record.zone()
+	for _, f := range testSuiteFiles {
+		t.Run(strings.TrimSuffix(filepath.Base(f.file), ".yml"), func(t *testing.T) {
+			suites, err := loadTestSuites(f.file)
+			if err != nil {
+				t.Fatalf("Failed to load test suites: %s", err)
 			}
-			for tName, tt := range suite.Tests {
-				t.Run(tName, func(t *testing.T) {
-					c := &Checker{Resolver: lowerCaseResolver{r}}
-					o := c.CheckMailFrom(context.TODO(), netip.MustParseAddr(tt.Host), tt.MailFrom, tt.Helo)
-					got, err := o.Result, o.Problem
-
-					isOneOfExpect := false
-					for _, result := range tt.Result {
-						if result == got {
-							isOneOfExpect = true
-							break
-						}
-					}
-					// "DEFAULT" means no explanation from "exp". The suite writes
-					// IPv6 nibbles in upper case, so compare case-insensitively.
-					wantExp := tt.Explanation
-					if wantExp == "DEFAULT" {
-						wantExp = ""
-					}
-					expOK := tt.Explanation == "" || strings.EqualFold(o.Explanation, wantExp)
-
-					key := suite.Description + "/" + tName
-					if knownFailures[key] {
-						if isOneOfExpect && expOK {
-							t.Errorf("known failure now passes, remove %q from knownFailures", key)
-						} else {
-							t.Skipf("known failure: wants %v %q, got %s %q", tt.Result, wantExp, got, o.Explanation)
-						}
-						return
-					}
-					if !isOneOfExpect {
-						t.Errorf("wants %v, got %s", tt.Result, got)
-					}
-					if !expOK {
-						t.Errorf("wants explanation %q, got %q", wantExp, o.Explanation)
-					}
-					if t.Failed() {
-						if err != nil {
-							t.Log(err)
-						}
-						t.Logf("spec: %s, %s ", tt.Spec, tt.Description)
-						t.Log(tt.Comment)
-					}
-				})
+			for _, suite := range suites {
+				runTestSuite(t, suite, f.skip)
 			}
 		})
-
 	}
+}
+
+func runTestSuite(t *testing.T, suite testSuite, skip map[string]string) {
+	t.Run(suite.name(), func(t *testing.T) {
+		r := &mockdns.Resolver{Zones: make(map[string]mockdns.Zone)}
+		for s, record := range suite.ZoneData {
+			r.Zones[strings.ToLower(dns.Fqdn(s))] = record.zone()
+		}
+		for tName, tt := range suite.Tests {
+			t.Run(tName, func(t *testing.T) {
+				c := &Checker{Resolver: lowerCaseResolver{r}}
+				o := c.CheckMailFrom(context.TODO(), netip.MustParseAddr(tt.Host), tt.MailFrom, tt.Helo)
+				got, err := o.Result, o.Problem
+
+				isOneOfExpect := false
+				for _, result := range tt.Result {
+					if result == got {
+						isOneOfExpect = true
+						break
+					}
+				}
+				// "DEFAULT" means no explanation from "exp". The suite writes
+				// IPv6 nibbles in upper case, so compare case-insensitively.
+				wantExp := tt.Explanation
+				if wantExp == "DEFAULT" {
+					wantExp = ""
+				}
+				expOK := tt.Explanation == "" || strings.EqualFold(o.Explanation, wantExp)
+
+				if reason, ok := skip[tName]; ok {
+					if isOneOfExpect && expOK {
+						t.Errorf("skipped case now passes, remove %q from the skip list", tName)
+					} else {
+						t.Skipf("%s: wants %v %q, got %s %q", reason, tt.Result, wantExp, got, o.Explanation)
+					}
+					return
+				}
+				if !isOneOfExpect {
+					t.Errorf("wants %v, got %s", tt.Result, got)
+				}
+				if !expOK {
+					t.Errorf("wants explanation %q, got %q", wantExp, o.Explanation)
+				}
+				if t.Failed() {
+					if err != nil {
+						t.Log(err)
+					}
+					t.Logf("spec: %s, %s ", tt.Spec, tt.Description)
+					t.Log(tt.Comment)
+				}
+			})
+		}
+	})
 }
 
 // lowerCaseResolver makes lookups case-insensitive like DNS,
@@ -459,7 +494,3 @@ func TestChecker_RFC7208Appendix4(t *testing.T) {
 	}
 
 }
-
-// knownFailures lists RFC 7208 test suite cases ("suite description/test name")
-// that are not passing yet. Remove an entry once it passes.
-var knownFailures = map[string]bool{}

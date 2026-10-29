@@ -1,7 +1,7 @@
 # This is the openspf.org test suite (release 2014.04) based on RFC 7208.
 # http://www.openspf.org/Test_Suite
 #
-# $Id: rfc7208-tests.yml,v 1.1.2.18 2015/01/13 04:40:07 customdesigned Exp $
+# $Id$
 # vim:sw=2 sts=2 et
 #
 # See rfc7208-tests.CHANGES for a changelog.
@@ -146,6 +146,24 @@ tests:
     host: 192.0.2.5
     mailfrom: "silly@trail.example.com"
     result: fail
+  null-text:
+    description: >-
+      Multiple strings are glued together with no separator.
+    comment: >-
+      Note that null text (no strings) is illegal, but SPF should not crash.
+    spec: 3.3
+    helo: hosed
+    host: 192.0.2.5
+    mailfrom: "silly@null.example.com"
+    result: pass
+  badip4:
+    description: >-
+      Mechanisms are separated by spaces only, not any control char.
+    spec: 4.6.1/2
+    helo: foobar
+    host: 192.0.2.5
+    mailfrom: "oops@badip.example.com"
+    result: permerror
 zonedata:
   example.com:
     - TIMEOUT
@@ -173,6 +191,11 @@ zonedata:
     - SPF: "v=spf1 a  -all"
   trail.example.com:
     - SPF: "v=spf1 a -all "
+  null.example.com:
+    - SPF: [ "v=spf1 ip4:", "192.0.2.5 -all" ]
+    - SPF: [ ]
+  badip.example.com:
+    - SPF:  "v=spf1 ip4:192.0.2.5\x0a include:spf.protection.outlook.com ~all"
 ---
 description: Record lookup
 tests:
@@ -710,6 +733,7 @@ zonedata:
     - CNAME: "CNAME.example.com."
   cname.example.com:
     - CNAME: "CNAME.example.com."
+
 ---
 description: A mechanism syntax
 tests:
@@ -1702,7 +1726,9 @@ tests:
     comment: >-
       A literal application of the grammar causes modifier syntax
       errors (except for macro syntax) to become unknown-modifier.
+      
         modifier = explanation | redirect | unknown-modifier
+      
       However, it is generally agreed, with precedent in other RFCs,
       that unknown-modifier should not be "greedy", and should not
       match known modifier names.  There should have been explicit
@@ -1842,7 +1868,9 @@ tests:
     comment: >-
       A literal application of the grammar causes modifier syntax
       errors (except for macro syntax) to become unknown-modifier.
+      
         modifier = explanation | redirect | unknown-modifier
+      
       However, it is generally agreed, with precedent in other RFCs,
       that unknown-modifier should not be "greedy", and should not
       match known modifier names.  There should have been explicit
@@ -2585,6 +2613,16 @@ tests:
     mailfrom: test@example.org
     result: pass
     strict: 2
+  cname-aliasing:
+    description: >-
+      referencing the same TXT record through multiple CNAME aliases
+    comment: >-
+      Pyspf incorrectly reports multiple SPF records
+    spec: 3.2/1
+    helo: mail.example.org
+    host: 192.0.2.27
+    mailfrom: test@mail.example.org
+    result: fail
 zonedata:
   example.org:
     - SPF: "v=spf1 mx redirect=_spf.example.com"
@@ -2604,3 +2642,19 @@ zonedata:
     - SPF: "v=spf1 ptr:fe.example.org ptr:sgp.example.com exp=_expspf.example.org -all"
   _expspf.example.org:
     - TXT: "Sender domain not allowed from this host. Please see http://www.openspf.org/Why?s=mfrom&id=%{S}&ip=%{C}&r=%{R}"
+  a.example.org:
+    - TXT: "Another TXT record."
+    - TXT: "v=spf1 ip4:192.0.2.225 ?include:webmail.pair.com ?include:relay.pair.com -all"
+    - TXT: "More TXT records."
+    - TXT: "A third TXT record."
+    - AAAA: 2001:db8:ff0:300::4
+  b.example.org:
+    - CNAME: "a.example.org"
+  mail.example.org:
+    - SPF: "v=spf1 include:a.example.org include:b.example.org -all"
+    - A: 192.0.2.28
+  webmail.pair.com:
+    - TXT: "v=spf1 ip4:66.39.3.0/24 ip4:209.68.6.94/32"
+  relay.pair.com:
+    - TXT: "v=spf1 ip4:209.68.5.9/32 ip4:209.68.5.15/32 a -all"
+    - A: 192.0.2.131
