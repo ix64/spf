@@ -2,8 +2,7 @@ package spf
 
 import (
 	"context"
-	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/netip"
 	"strings"
@@ -52,7 +51,15 @@ const (
 	ResultPermError Result = "permerror"
 )
 
-var discardLogger = log.New(io.Discard, "", 0)
+var discardLogger = slog.New(discardHandler{})
+
+// discardHandler drops every record, like slog.DiscardHandler of Go 1.24.
+type discardHandler struct{}
+
+func (discardHandler) Enabled(context.Context, slog.Level) bool  { return false }
+func (discardHandler) Handle(context.Context, slog.Record) error { return nil }
+func (h discardHandler) WithAttrs([]slog.Attr) slog.Handler      { return h }
+func (h discardHandler) WithGroup(string) slog.Handler           { return h }
 
 // NewVerifier creates a new SPF Verifier
 // sender is the email address of the sender (we don't check if it's valid)
@@ -109,7 +116,7 @@ type Verifier struct {
 
 	resolver    DNSResolver
 	timeout     time.Duration
-	logger      *log.Logger
+	logger      *slog.Logger
 	lookupLimit int
 	receiver    string
 }
@@ -133,7 +140,12 @@ func (s *Verifier) SetLookupLimit(limit int) {
 	s.lookupLimit = limit
 }
 
-func (s *Verifier) SetLogger(logger *log.Logger) {
+// SetLogger sets the logger for the steps of each check, logged at debug level.
+// A nil logger disables logging, which is the default.
+func (s *Verifier) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		logger = discardLogger
+	}
 	s.logger = logger
 }
 
@@ -190,6 +202,7 @@ func (s *Verifier) check(ctx context.Context, identity Identity) *Outcome {
 	}
 	// a HELO with an address literal is not a valid domain either
 	if !isValidDomain(v.senderDomain) {
+		s.logResult(ctx, o)
 		return o
 	}
 
@@ -201,7 +214,14 @@ func (s *Verifier) check(ctx context.Context, identity Identity) *Outcome {
 	if o.Result == ResultFail {
 		o.Explanation = e.explanation
 	}
+	s.logResult(ctx, o)
 	return o
+}
+
+func (s *Verifier) logResult(ctx context.Context, o *Outcome) {
+	s.logger.DebugContext(ctx, "spf: result",
+		"identity", string(o.Identity), "sender", o.Sender, "ip", o.ClientIP.String(),
+		"result", string(o.Result), "mechanism", o.Mechanism, errAttr(o.Problem))
 }
 
 // isValidDomain reports whether domain is a well-formed multi-label domain name,
