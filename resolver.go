@@ -3,12 +3,18 @@ package spf
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 
 	"github.com/miekg/dns"
 )
 
+// Resolver looks up the DNS records used by SPF. *net.Resolver implements it.
+//
+// Like net.Resolver, a name that doesn't exist or has no records of the
+// type must be reported as a *net.DNSError with IsNotFound set; any other
+// error is a temporary failure, giving ResultTempError.
 type Resolver interface {
 	// LookupTXT returns all TXT records for the given domain.
 	LookupTXT(ctx context.Context, name string) ([]string, error)
@@ -26,55 +32,81 @@ type Resolver interface {
 	LookupAddr(ctx context.Context, addr string) ([]string, error)
 }
 
-var limitExceededDeadline = wrapCheckError(context.DeadlineExceeded, ResultTempError, "dns: lookup timed out")
-var errInvalidDomain = newCheckError(ResultPermError, "dns: invalid domain name")
+// errNotFound means a name doesn't exist or has no records of the type.
+var errNotFound = errors.New("no records")
 
-// lookupError converts an error returned by a Resolver into a *checkError.
-// A name without records maps to ResultNone.
-func lookupError(err error) error {
+// isNotFound reports whether err means the queried name has no records.
+func isNotFound(err error) bool {
+	return errors.Is(err, errNotFound)
+}
+
+// stopped returns the error ending the evaluation because ctx is done.
+func stopped(ctxErr error) error {
+	return wrapCheckError(ctxErr, ResultTempError, "spf: check stopped")
+}
+
+// beforeLookup returns an error if the evaluation must stop, or if name
+// is given and is not a valid domain name.
+func (e *evaluation) beforeLookup(name string) error {
+	if err := e.ctx.Err(); err != nil {
+		return stopped(err)
+	}
+	if name != "" {
+		if _, ok := dns.IsDomainName(name); !ok {
+			return newCheckError(ResultPermError, fmt.Sprintf("invalid domain name %q", name))
+		}
+	}
+	return nil
+}
+
+// lookupError classifies an error returned by the Resolver.
+func (e *evaluation) lookupError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var cErr *checkError
-	if errors.As(err, &cErr) {
-		return cErr
+	// the resolver may not report why it stopped
+	if ctxErr := e.ctx.Err(); ctxErr != nil {
+		return stopped(ctxErr)
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return limitExceededDeadline
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return stopped(err)
 	}
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
-		return newCheckError(ResultNone, "dns: "+dnsErr.Error())
+		return fmt.Errorf("%w: %w", errNotFound, err)
 	}
 	// any other DNS failure is treated as transient
-	return wrapCheckError(err, ResultTempError, "dns: lookup failed")
+	return wrapCheckError(err, ResultTempError, "")
 }
 
 func (e *evaluation) lookupTXT(name string) ([]string, error) {
-	if _, ok := dns.IsDomainName(name); !ok {
-		return nil, errInvalidDomain
+	if err := e.beforeLookup(name); err != nil {
+		return nil, err
 	}
 	rs, err := e.resolver.LookupTXT(e.ctx, name)
-	return rs, lookupError(err)
+	return rs, e.lookupError(err)
 }
 
 func (e *evaluation) lookupNetIP(network, host string) ([]netip.Addr, error) {
-	if _, ok := dns.IsDomainName(host); !ok {
-		return nil, errInvalidDomain
+	if err := e.beforeLookup(host); err != nil {
+		return nil, err
 	}
 	rs, err := e.resolver.LookupNetIP(e.ctx, network, host)
-	return rs, lookupError(err)
+	return rs, e.lookupError(err)
 }
 
 func (e *evaluation) lookupMX(name string) ([]*net.MX, error) {
-	if _, ok := dns.IsDomainName(name); !ok {
-		return nil, errInvalidDomain
+	if err := e.beforeLookup(name); err != nil {
+		return nil, err
 	}
 	rs, err := e.resolver.LookupMX(e.ctx, name)
-	return rs, lookupError(err)
+	return rs, e.lookupError(err)
 }
 
 func (e *evaluation) lookupAddr(addr netip.Addr) ([]string, error) {
+	if err := e.beforeLookup(""); err != nil {
+		return nil, err
+	}
 	rs, err := e.resolver.LookupAddr(e.ctx, addr.String())
-	return rs, lookupError(err)
+	return rs, e.lookupError(err)
 }

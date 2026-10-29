@@ -192,6 +192,8 @@ func TestChecker_problems(t *testing.T) {
 		"multiple.example.com.": {TXT: []string{"v=spf1 -all", "v=spf1 +all"}},
 		"void.example.com.":     {TXT: []string{"v=spf1 a:x1.example.com a:x2.example.com a:x3.example.com -all"}},
 		"mx.example.com.":       {TXT: []string{"v=spf1 mx -all"}, MX: mx, A: []string{"192.0.2.10"}},
+		"include.example.com.":  {TXT: []string{"v=spf1 include:none.example.com -all"}},
+		"redirect.example.com.": {TXT: []string{"v=spf1 redirect=none.example.com"}},
 	}}
 	tests := []struct {
 		domain   string
@@ -202,6 +204,8 @@ func TestChecker_problems(t *testing.T) {
 		{"multiple.example.com", resolver, ResultPermError, ErrMultipleRecords},
 		{"void.example.com", resolver, ResultPermError, ErrTooManyVoidLookups},
 		{"mx.example.com", resolver, ResultPermError, ErrTooManyMX},
+		{"include.example.com", resolver, ResultPermError, ErrNoRecord},
+		{"redirect.example.com", resolver, ResultPermError, ErrNoRecord},
 		{"timeout.example.com", blockingResolver{}, ResultTempError, context.DeadlineExceeded},
 	}
 	for _, tt := range tests {
@@ -244,6 +248,80 @@ func Test_isValidDomain(t *testing.T) {
 	for _, tt := range tests {
 		if got := isValidDomain(tt.domain); got != tt.want {
 			t.Errorf("isValidDomain(%q) = %v, want %v", tt.domain, got, tt.want)
+		}
+	}
+}
+
+// cancelingResolver cancels the context after the first TXT lookup,
+// and like mockdns it ignores the context itself.
+type cancelingResolver struct {
+	*mockdns.Resolver
+	cancel context.CancelFunc
+}
+
+func (r cancelingResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
+	defer r.cancel()
+	return r.Resolver.LookupTXT(ctx, name)
+}
+
+// slowResolver delays every lookup and ignores the context.
+type slowResolver struct {
+	*mockdns.Resolver
+}
+
+func (r slowResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	time.Sleep(5 * time.Millisecond)
+	return r.Resolver.LookupNetIP(ctx, network, host)
+}
+
+// a done context ends the check with temperror, even where DNS errors are
+// otherwise ignored and even if the resolver ignores the context
+func TestChecker_stopped(t *testing.T) {
+	resolver := &mockdns.Resolver{Zones: map[string]mockdns.Zone{
+		// a "ptr" ignoring the error would end in a "fail"
+		"ptr.example.com.": {TXT: []string{"v=spf1 ptr -all"}},
+		"slow.example.com.": {
+			TXT: []string{"v=spf1 a a a a a a a a a a -all"},
+			A:   []string{"192.0.2.10"},
+		},
+	}}
+	ip := netip.MustParseAddr("192.0.2.1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := &Checker{Resolver: cancelingResolver{resolver, cancel}}
+	o := c.CheckMailFrom(ctx, ip, "user@ptr.example.com", "example.net")
+	if o.Result != ResultTempError || !errors.Is(o.Problem, context.Canceled) {
+		t.Errorf("canceled: CheckMailFrom() = (%s, %v), want (%s, %v)", o.Result, o.Problem, ResultTempError, context.Canceled)
+	}
+
+	c = &Checker{Resolver: slowResolver{resolver}, Timeout: 12 * time.Millisecond}
+	o = c.CheckMailFrom(context.Background(), ip, "user@slow.example.com", "example.net")
+	if o.Result != ResultTempError || !errors.Is(o.Problem, context.DeadlineExceeded) {
+		t.Errorf("timeout: CheckMailFrom() = (%s, %v), want (%s, %v)", o.Result, o.Problem, ResultTempError, context.DeadlineExceeded)
+	}
+}
+
+// problems name each record on the way to the cause
+func TestChecker_problemMessage(t *testing.T) {
+	resolver := &mockdns.Resolver{Zones: map[string]mockdns.Zone{
+		"example.com.":      {TXT: []string{"v=spf1 include:_spf.example.com -all"}},
+		"_spf.example.com.": {TXT: []string{"v=spf1 redirect=bad.example.com"}},
+		"bad.example.com.":  {TXT: []string{"v=spf1 ip4:192.0.2.1 moo"}},
+		"none.example.com.": {TXT: []string{"v=spf1 include:%{d2}.example.org -all"}},
+	}}
+	tests := []struct {
+		domain string
+		want   string
+	}{
+		{"example.com", `include:_spf.example.com: redirect=bad.example.com: bad.example.com: spf: invalid term "moo": unknown mechanism "moo"`},
+		{"none.example.com", "include:example.com.example.org: spf: no SPF record"},
+	}
+	for _, tt := range tests {
+		c := &Checker{Resolver: resolver}
+		o := c.CheckMailFrom(context.TODO(), netip.MustParseAddr("192.0.2.1"), "user@"+tt.domain, "example.net")
+		if o.Problem == nil || o.Problem.Error() != tt.want {
+			t.Errorf("%s: problem = %v, want %s", tt.domain, o.Problem, tt.want)
 		}
 	}
 }
