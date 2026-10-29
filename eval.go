@@ -11,7 +11,7 @@ import (
 
 // evaluation holds the state of a single SPF check.
 type evaluation struct {
-	*Verifier
+	*check
 	ctx context.Context
 
 	lookups     int // terms that caused DNS lookups
@@ -37,13 +37,13 @@ const (
 	maxPTRNames = 10
 )
 
-var limitExceededAmount = NewCheckError(ResultPermError, "dns: query limit exceeded (amount)")
-var limitExceededVoid = NewCheckError(ResultPermError, "dns: void lookup limit exceeded")
-var limitExceededMX = NewCheckError(ResultPermError, "dns: too many MX records")
+var limitExceededAmount = wrapCheckError(ErrTooManyLookups, ResultPermError, "")
+var limitExceededVoid = wrapCheckError(ErrTooManyVoidLookups, ResultPermError, "")
+var limitExceededMX = wrapCheckError(ErrTooManyMX, ResultPermError, "")
 
 // resultOf returns the SPF result carried by err.
 func resultOf(err error) Result {
-	var cErr *CheckError
+	var cErr *checkError
 	if errors.As(err, &cErr) {
 		return cErr.result
 	}
@@ -57,9 +57,9 @@ func isNotFound(err error) bool {
 
 // isLimitExceeded reports whether err means the evaluation must stop.
 func isLimitExceeded(err error) bool {
-	return errors.Is(err, limitExceededAmount) ||
-		errors.Is(err, limitExceededDeadline) ||
-		errors.Is(err, limitExceededVoid)
+	return errors.Is(err, ErrTooManyLookups) ||
+		errors.Is(err, ErrTooManyVoidLookups) ||
+		errors.Is(err, context.DeadlineExceeded)
 }
 
 // debug logs a step of the evaluation.
@@ -204,11 +204,11 @@ func (e *evaluation) lookupRecord(domain string) (*Record, error) {
 	case 1:
 		rec, err := Parse(records[0])
 		if err != nil {
-			return nil, WrapCheckError(err, ResultPermError, "invalid record on "+domain)
+			return nil, wrapCheckError(err, ResultPermError, "invalid record on "+domain)
 		}
 		return rec, nil
 	default:
-		return nil, NewCheckError(ResultPermError, "multiple records on "+domain)
+		return nil, wrapCheckError(ErrMultipleRecords, ResultPermError, domain)
 	}
 }
 
@@ -245,7 +245,7 @@ func (e *evaluation) match(m Mechanism, env *macroEnv) (bool, error) {
 	case MechanismExists:
 		return e.matchExists(target)
 	default: // should not happen
-		return false, NewCheckError(ResultPermError, fmt.Sprintf("unknown mechanism %T", m))
+		return false, newCheckError(ResultPermError, fmt.Sprintf("unknown mechanism %T", m))
 	}
 }
 
@@ -279,11 +279,11 @@ func (e *evaluation) matchInclude(host string) (bool, error) {
 	case ResultFail, ResultSoftFail, ResultNeutral:
 		return false, nil
 	case ResultTempError:
-		return false, WrapCheckError(err, ResultTempError, "check include host failed")
+		return false, wrapCheckError(err, ResultTempError, "check include host failed")
 	case ResultNone:
-		return false, NewCheckError(ResultPermError, "include host has no record: "+host)
+		return false, newCheckError(ResultPermError, "include host has no record: "+host)
 	default:
-		return false, WrapCheckError(err, ResultPermError, "check include host failed")
+		return false, wrapCheckError(err, ResultPermError, "check include host failed")
 	}
 }
 

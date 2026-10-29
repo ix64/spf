@@ -13,7 +13,7 @@ import (
 	"github.com/foxcpp/go-mockdns"
 )
 
-func TestVerifier_CheckHelo(t *testing.T) {
+func TestChecker_CheckHelo(t *testing.T) {
 	resolver := &mockdns.Resolver{Zones: map[string]mockdns.Zone{
 		"mail.example.com.": {
 			TXT: []string{"v=spf1 a -all"},
@@ -35,20 +35,19 @@ func TestVerifier_CheckHelo(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.helo+"/"+tt.ip, func(t *testing.T) {
-			v := NewVerifier("someone@example.com", netip.MustParseAddr(tt.ip), tt.helo)
-			v.SetResolver(resolver)
-			o := v.CheckHelo(context.TODO())
+			c := &Checker{Resolver: resolver}
+			o := c.CheckHelo(context.TODO(), netip.MustParseAddr(tt.ip), tt.helo)
 			if o.Result != tt.want {
 				t.Errorf("CheckHelo() = %s, want %s, problem: %v", o.Result, tt.want, o.Problem)
 			}
-			if o.Identity != IdentityHelo || o.Sender != "postmaster@"+tt.helo || o.MailFrom != "someone@example.com" {
-				t.Errorf("CheckHelo() = %+v, want identity helo and sender postmaster@%s", o, tt.helo)
+			if o.Identity != IdentityHelo || o.Sender != "postmaster@"+tt.helo || o.MailFrom != "" {
+				t.Errorf("CheckHelo() = %+v, want identity helo, sender postmaster@%s and no MAIL FROM", o, tt.helo)
 			}
 		})
 	}
 }
 
-func TestVerifier_Check(t *testing.T) {
+func TestChecker_CheckMailFrom(t *testing.T) {
 	resolver := &mockdns.Resolver{Zones: map[string]mockdns.Zone{
 		"example.com.": {
 			TXT: []string{"v=spf1 include:_spf.example.com -all exp=exp.example.com"},
@@ -74,10 +73,8 @@ func TestVerifier_Check(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.ip, func(t *testing.T) {
-			v := NewVerifier("user@example.com", netip.MustParseAddr(tt.ip), "helo.example.org")
-			v.SetResolver(resolver)
-			v.SetReceiver("mx.example.net")
-			o := v.Check(context.TODO())
+			c := &Checker{Resolver: resolver, Receiver: "mx.example.net"}
+			o := c.CheckMailFrom(context.TODO(), netip.MustParseAddr(tt.ip), "user@example.com", "helo.example.org")
 			if o.Result != tt.wantResult || o.Mechanism != tt.wantMechanism || o.Explanation != tt.wantExplanation {
 				t.Errorf("Check() = (%s, %q, %q), want (%s, %q, %q)",
 					o.Result, o.Mechanism, o.Explanation, tt.wantResult, tt.wantMechanism, tt.wantExplanation)
@@ -119,8 +116,9 @@ func TestOutcome_ReceivedSPF(t *testing.T) {
 				Helo:     "helo.example.com",
 				Problem:  errors.New(`invalid term "a:(x)"`),
 			},
+			// no envelope-from, since a HELO check may happen before MAIL FROM
 			`permerror (permanent error in processing domain of postmaster@helo.example.com)` +
-				` client-ip="2001:db8::1"; envelope-from=""; helo=helo.example.com; identity=helo;` +
+				` client-ip="2001:db8::1"; helo=helo.example.com; identity=helo;` +
 				` problem="invalid term \"a:(x)\"";`,
 		},
 		{
@@ -146,8 +144,7 @@ func TestOutcome_ReceivedSPF(t *testing.T) {
 }
 
 func Test_parseExplanation(t *testing.T) {
-	env := NewVerifier("user@example.com", netip.MustParseAddr("2001:db8::1"), "helo.example.org").env("example.com")
-	env.receiver = "mx.example.net"
+	env := newTestCheck(&Checker{Receiver: "mx.example.net"}, "user@example.com", netip.MustParseAddr("2001:db8::1"), "helo.example.org").env("example.com")
 
 	m, err := parseExplanation("%{c} is not allowed for %{d}, see %{r} at %{t}")
 	if err != nil {
@@ -174,7 +171,7 @@ func Test_parseExplanation(t *testing.T) {
 	}
 }
 
-func TestVerifier_SetLogger(t *testing.T) {
+func TestChecker_Logger(t *testing.T) {
 	resolver := &mockdns.Resolver{Zones: map[string]mockdns.Zone{
 		"example.com.": {
 			TXT: []string{"v=spf1 redirect=_spf.example.com"},
@@ -184,10 +181,8 @@ func TestVerifier_SetLogger(t *testing.T) {
 		},
 	}}
 	var buf bytes.Buffer
-	v := NewVerifier("user@example.com", netip.MustParseAddr("198.51.100.1"), "helo.example.org")
-	v.SetResolver(resolver)
-	v.SetLogger(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	v.Check(context.TODO())
+	c := &Checker{Resolver: resolver, Logger: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+	c.CheckMailFrom(context.TODO(), netip.MustParseAddr("198.51.100.1"), "user@example.com", "helo.example.org")
 
 	for _, want := range []string{
 		`msg="spf: record" domain=example.com record="v=spf1 redirect=_spf.example.com"`,
@@ -205,6 +200,6 @@ func TestVerifier_SetLogger(t *testing.T) {
 	}
 
 	// a nil logger disables logging
-	v.SetLogger(nil)
-	v.Check(context.TODO())
+	c.Logger = nil
+	c.CheckMailFrom(context.TODO(), netip.MustParseAddr("198.51.100.1"), "user@example.com", "helo.example.org")
 }

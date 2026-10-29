@@ -9,7 +9,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-type DNSResolver interface {
+type Resolver interface {
 	// LookupTXT returns all TXT records for the given domain.
 	LookupTXT(ctx context.Context, name string) ([]string, error)
 
@@ -26,16 +26,16 @@ type DNSResolver interface {
 	LookupAddr(ctx context.Context, addr string) ([]string, error)
 }
 
-var limitExceededDeadline = NewCheckError(ResultTempError, "dns: query limit exceeded (deadline)")
-var errInvalidDomain = NewCheckError(ResultPermError, "dns: invalid domain name")
+var limitExceededDeadline = wrapCheckError(context.DeadlineExceeded, ResultTempError, "dns: lookup timed out")
+var errInvalidDomain = newCheckError(ResultPermError, "dns: invalid domain name")
 
-// lookupError converts an error returned by DNSResolver into a *CheckError.
+// lookupError converts an error returned by a Resolver into a *checkError.
 // A name without records maps to ResultNone.
 func lookupError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var cErr *CheckError
+	var cErr *checkError
 	if errors.As(err, &cErr) {
 		return cErr
 	}
@@ -44,10 +44,10 @@ func lookupError(err error) error {
 	}
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
-		return NewCheckError(ResultNone, "dns: "+dnsErr.Error())
+		return newCheckError(ResultNone, "dns: "+dnsErr.Error())
 	}
 	// any other DNS failure is treated as transient
-	return WrapCheckError(err, ResultTempError, "dns: lookup failed")
+	return wrapCheckError(err, ResultTempError, "dns: lookup failed")
 }
 
 func (e *evaluation) lookupTXT(name string) ([]string, error) {
