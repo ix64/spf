@@ -472,8 +472,11 @@ func TestChecker_RFC7208Appendix4(t *testing.T) {
 	addMockSPFRecord(resolver, "example.com.", "v=spf1 -include:ip4._spf.%{d} -include:ptr._spf.%{d} +all")
 	addMockSPFRecord(resolver, "ip4._spf.example.com.", "v=spf1 -ip4:192.0.2.0/24 +all")
 	// The RFC example uses "-ptr", whose <target-name> is the <domain> being checked,
-	// i.e. "ptr._spf.example.com" when included. Name the sender domain explicitly instead.
-	addMockSPFRecord(resolver, "ptr._spf.example.com.", "v=spf1 -ptr:%{o} +all")
+	// i.e. "ptr._spf.example.com" when included, so it can never match. Use the
+	// fix of erratum 6216, and TXT instead of the SPF RR type as in erratum 4001.
+	// ref: https://www.rfc-editor.org/errata/eid6216
+	// ref: https://www.rfc-editor.org/errata/eid4001
+	addMockSPFRecord(resolver, "ptr._spf.example.com.", "v=spf1 -ptr:example.com +all")
 
 	cases := []SPFTestCase{
 		{"mary@example.com", netip.MustParseAddr("192.0.2.10"), "example.net", ResultPass},
