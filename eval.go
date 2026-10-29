@@ -232,6 +232,13 @@ func (e *evaluation) match(m Mechanism, env *macroEnv) (bool, error) {
 		if target, err = spec.expandDomain(env); err != nil {
 			return false, err
 		}
+		// %{s} and %{l} of a non-ASCII local-part can't form a DNS name,
+		// such terms do not match anything
+		// ref: https://datatracker.ietf.org/doc/html/rfc8616#section-4
+		if !isASCII(target) {
+			e.debug("spf: non-ASCII target", "domain", env.domain, "target", target)
+			return false, nil
+		}
 	}
 
 	switch m := m.(type) {

@@ -7,6 +7,8 @@ import (
 	"net/netip"
 	"strings"
 	"time"
+
+	"golang.org/x/net/idna"
 )
 
 // Qualifier for SPF DNS record's directive https://datatracker.ietf.org/doc/html/rfc7208#section-4.6.2
@@ -98,11 +100,12 @@ func CheckHelo(ctx context.Context, ip netip.Addr, helo string) *Outcome {
 // CheckMailFrom checks the MAIL FROM identity of a message from ip.
 // mailFrom is the MAIL FROM reverse-path without angle brackets; when it's
 // empty, "postmaster@" + helo is checked. helo is the domain of the
-// HELO/EHLO command.
+// HELO/EHLO command. Domains may be internationalized, with U-labels.
 // ref: https://datatracker.ietf.org/doc/html/rfc7208#section-2.4
 func (c *Checker) CheckMailFrom(ctx context.Context, ip netip.Addr, mailFrom, helo string) *Outcome {
+	helo = toASCII(helo)
 	local, domain := splitSender(mailFrom, helo)
-	return c.newCheck(ip, mailFrom, helo, local, domain).run(ctx, IdentityMailFrom)
+	return c.newCheck(ip, mailFrom, helo, local, toASCII(domain)).run(ctx, IdentityMailFrom)
 }
 
 // CheckHelo checks the HELO identity, i.e. "postmaster@" + helo, which is
@@ -110,7 +113,36 @@ func (c *Checker) CheckMailFrom(ctx context.Context, ip netip.Addr, mailFrom, he
 // MAIL FROM check unnecessary. A HELO with an address literal gives ResultNone.
 // ref: https://datatracker.ietf.org/doc/html/rfc7208#section-2.3
 func (c *Checker) CheckHelo(ctx context.Context, ip netip.Addr, helo string) *Outcome {
+	helo = toASCII(helo)
 	return c.newCheck(ip, "", helo, "postmaster", helo).run(ctx, IdentityHelo)
+}
+
+// idnaProfile converts internationalized domain names for lookup, like
+// idna.Lookup but allowing underscores, which are common in DNS.
+var idnaProfile = idna.New(idna.MapForLookup(), idna.BidiRule(), idna.StrictDomainName(false))
+
+// toASCII converts the U-labels of an internationalized domain name to
+// A-labels, as SPF requires. A domain that can't be converted is returned
+// as is, and is then rejected as malformed.
+// ref: https://datatracker.ietf.org/doc/html/rfc8616#section-4
+func toASCII(domain string) string {
+	if isASCII(domain) {
+		return domain
+	}
+	ascii, err := idnaProfile.ToASCII(domain)
+	if err != nil {
+		return domain
+	}
+	return ascii
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // splitSender splits sender into local-part and domain.
@@ -222,14 +254,16 @@ func isValidDomain(domain string) bool {
 
 // isDomainName reports whether s is a domain name that fits in DNS: labels of
 // 1 to 63 octets, at most 253 octets without the optional trailing dot.
-// Like DNS itself, it allows any octet in labels.
+// Like DNS itself, it allows any ASCII octet in labels; U-labels must be
+// converted to A-labels first.
 // ref: https://datatracker.ietf.org/doc/html/rfc1035#section-2.3.4
+// ref: https://datatracker.ietf.org/doc/html/rfc8616#section-4
 func isDomainName(s string) bool {
 	if s == "." {
 		return true
 	}
 	s = strings.TrimSuffix(s, ".")
-	if s == "" || len(s) > 253 {
+	if s == "" || len(s) > 253 || !isASCII(s) {
 		return false
 	}
 	for label := range strings.SplitSeq(s, ".") {

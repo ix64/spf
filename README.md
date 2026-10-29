@@ -6,6 +6,8 @@
   except two for a modifier of SPF drafts
 - Checks both the MAIL FROM and HELO identities, with `exp=` explanations
   and `Received-SPF` headers
+- Accepts internationalized domain names, converted to A-labels per
+  [RFC 8616](https://datatracker.ietf.org/doc/html/rfc8616)
 - Supports Go 1.24+
 
 ## Install

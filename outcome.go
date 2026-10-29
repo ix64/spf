@@ -21,11 +21,12 @@ type Outcome struct {
 	Result   Result
 	Identity Identity
 
-	// Sender is the <sender> checked, e.g. "postmaster@" + Helo for IdentityHelo.
+	// Sender is the <sender> checked, e.g. "postmaster@" + Helo for IdentityHelo,
+	// with its domain in A-labels.
 	Sender   string
 	MailFrom string // MAIL FROM as given to CheckMailFrom, empty for CheckHelo
 	ClientIP netip.Addr
-	Helo     string
+	Helo     string // HELO domain, in A-labels
 	Receiver string // Checker.Receiver
 
 	// Mechanism is the directive that produced the result, empty if none matched.
