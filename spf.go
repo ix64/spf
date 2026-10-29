@@ -7,8 +7,6 @@ import (
 	"net/netip"
 	"strings"
 	"time"
-
-	"github.com/miekg/dns"
 )
 
 // Qualifier for SPF DNS record's directive https://datatracker.ietf.org/doc/html/rfc7208#section-4.6.2
@@ -219,15 +217,22 @@ func (ch *check) logResult(ctx context.Context, o *Outcome) {
 // check_host() returns "none" immediately otherwise.
 // ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.3
 func isValidDomain(domain string) bool {
-	domain = strings.TrimSuffix(domain, ".")
-	if _, ok := dns.IsDomainName(domain); !ok {
+	return isDomainName(domain) && strings.Contains(strings.TrimSuffix(domain, "."), ".")
+}
+
+// isDomainName reports whether s is a domain name that fits in DNS: labels of
+// 1 to 63 octets, at most 253 octets without the optional trailing dot.
+// Like DNS itself, it allows any octet in labels.
+// ref: https://datatracker.ietf.org/doc/html/rfc1035#section-2.3.4
+func isDomainName(s string) bool {
+	if s == "." {
+		return true
+	}
+	s = strings.TrimSuffix(s, ".")
+	if s == "" || len(s) > 253 {
 		return false
 	}
-	labels := strings.Split(domain, ".")
-	if len(labels) < 2 {
-		return false
-	}
-	for _, label := range labels {
+	for label := range strings.SplitSeq(s, ".") {
 		if label == "" || len(label) > 63 {
 			return false
 		}

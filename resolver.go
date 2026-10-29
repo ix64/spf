@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-
-	"github.com/miekg/dns"
 )
 
 // Resolver looks up the DNS records used by SPF. *net.Resolver implements it.
@@ -52,7 +50,7 @@ func (e *evaluation) beforeLookup(name string) error {
 		return stopped(err)
 	}
 	if name != "" {
-		if _, ok := dns.IsDomainName(name); !ok {
+		if !isDomainName(name) {
 			return newCheckError(ResultPermError, fmt.Sprintf("invalid domain name %q", name))
 		}
 	}
