@@ -185,26 +185,36 @@ type macroEnv struct {
 	domain       string // <domain> currently being checked
 	ip           netip.Addr
 	helloDomain  string
+
+	// validatedName returns the value of %{p}, nil means "unknown".
+	validatedName func() (string, error)
 }
 
 // expand returns the macro-string with every macro-expand replaced.
 // ref: https://datatracker.ietf.org/doc/html/rfc7208#section-7.3
-func (m MacroString) expand(env *macroEnv) string {
+func (m MacroString) expand(env *macroEnv) (string, error) {
 	var sb strings.Builder
 	for _, part := range m.parts {
 		if part.letter == 0 {
 			sb.WriteString(part.literal)
 			continue
 		}
-		sb.WriteString(part.expand(env))
+		value, err := part.expand(env)
+		if err != nil {
+			return "", err
+		}
+		sb.WriteString(value)
 	}
-	return sb.String()
+	return sb.String(), nil
 }
 
 // expandDomain expands a domain-spec. When the result is longer than 253
 // characters, left-side labels are removed until it fits.
-func (m MacroString) expandDomain(env *macroEnv) string {
-	domain := m.expand(env)
+func (m MacroString) expandDomain(env *macroEnv) (string, error) {
+	domain, err := m.expand(env)
+	if err != nil {
+		return "", err
+	}
 	for len(domain) > 253 {
 		dot := strings.IndexByte(domain, '.')
 		if dot < 0 {
@@ -212,10 +222,10 @@ func (m MacroString) expandDomain(env *macroEnv) string {
 		}
 		domain = domain[dot+1:]
 	}
-	return domain
+	return domain, nil
 }
 
-func (p macroPart) expand(env *macroEnv) string {
+func (p macroPart) expand(env *macroEnv) (string, error) {
 	var value string
 	switch p.letter {
 	case 's':
@@ -229,9 +239,15 @@ func (p macroPart) expand(env *macroEnv) string {
 	case 'i':
 		value = formatIPDotNotation(env.ip)
 	case 'p':
-		// do not use, always return safe value
+		// validated domain name of <ip>, its use is discouraged
 		// https://datatracker.ietf.org/doc/html/rfc7208#section-7.3
 		value = "unknown"
+		if env.validatedName != nil {
+			var err error
+			if value, err = env.validatedName(); err != nil {
+				return "", err
+			}
+		}
 	case 'v':
 		if env.ip.Is4() {
 			value = "in-addr"
@@ -258,7 +274,7 @@ func (p macroPart) expand(env *macroEnv) string {
 	if p.escape {
 		value = urlEscape(value)
 	}
-	return value
+	return value, nil
 }
 
 // urlEscape escapes every character outside the "unreserved" set of RFC 3986.

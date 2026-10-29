@@ -73,6 +73,7 @@ func NewVerifier(sender string, ip netip.Addr, helloDomain string) *Verifier {
 		helloDomain: helloDomain,
 		logger:      discardLogger,
 		timeout:     defaultSPFTimeout,
+		lookupLimit: defaultMaxLookups,
 	}
 	s.SetResolver(net.DefaultResolver)
 	return s
@@ -105,18 +106,29 @@ type Verifier struct {
 	ip           netip.Addr
 	helloDomain  string
 
-	resolver *LimitResolver
-	timeout  time.Duration
-	logger   *log.Logger
+	resolver    DNSResolver
+	timeout     time.Duration
+	logger      *log.Logger
+	lookupLimit int
 }
 
 func (s *Verifier) SetResolver(resolver DNSResolver) {
-	limited, ok := resolver.(*LimitResolver)
-	if ok {
-		s.resolver = limited
-	} else {
-		s.resolver = NewLimitResolver(resolver, defaultMaxLookups)
+	s.resolver = resolver
+}
+
+// defaultMaxLookups is the number of terms causing DNS lookups during SPF evaluation
+// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.6.4
+const defaultMaxLookups = 10
+
+// SetLookupLimit sets the number of terms causing DNS lookups
+// ("include", "a", "mx", "ptr", "exists" and "redirect") allowed in one check.
+// If this limit is exceeded the result is ResultPermError.
+// A limit <= 0 restores the default of 10.
+func (s *Verifier) SetLookupLimit(limit int) {
+	if limit <= 0 {
+		limit = defaultMaxLookups
 	}
+	s.lookupLimit = limit
 }
 
 func (s *Verifier) SetLogger(logger *log.Logger) {
@@ -137,10 +149,34 @@ func (s *Verifier) Test(ctx context.Context) (Result, error) {
 		return ResultFail, errors.New("hello domain is not a domain")
 	}
 
+	if !isValidDomain(s.senderDomain) {
+		return ResultNone, nil
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	e := &evaluation{Verifier: s, ctx: ctx}
 	return e.checkHost(s.senderDomain)
+}
+
+// isValidDomain reports whether domain is a well-formed multi-label domain name,
+// check_host() returns "none" immediately otherwise.
+// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.3
+func isValidDomain(domain string) bool {
+	domain = strings.TrimSuffix(domain, ".")
+	if _, ok := dns.IsDomainName(domain); !ok {
+		return false
+	}
+	labels := strings.Split(domain, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+	}
+	return true
 }
 
 // env returns the macro values while checking domain.

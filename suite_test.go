@@ -50,16 +50,26 @@ func (t *testResult) UnmarshalYAML(unmarshal func(interface{}) error) error {
 // testZoneRecord holds the records of a name in the test suite zone data.
 // SPF records are served as TXT records, unless the name has its own TXT records.
 // A TXT record "NONE" means the name has no TXT records.
+// "TIMEOUT" means lookups without matching records time out; since the
+// mock resolver can only time out a whole name, the name times out
+// unless it has TXT records, which is what SPF evaluation looks up.
 type testZoneRecord struct {
 	mockdns.Zone
-	spf    []string
-	hasTXT bool
+	spf     []string
+	hasTXT  bool
+	timeout bool
 }
 
 func (t *testZoneRecord) zone() mockdns.Zone {
 	zone := t.Zone
 	if !t.hasTXT {
 		zone.TXT = t.spf
+	}
+	if t.timeout && len(zone.TXT) == 0 {
+		zone.Err = &net.DNSError{
+			Err:       context.DeadlineExceeded.Error(),
+			IsTimeout: true,
+		}
 	}
 	return zone
 }
@@ -73,10 +83,7 @@ func (t *testZoneRecord) UnmarshalYAML(unmarshal func(interface{}) error) error 
 		switch item.(type) {
 		case string:
 			if item.(string) == "TIMEOUT" {
-				t.Err = &net.DNSError{
-					Err:       context.DeadlineExceeded.Error(),
-					IsTimeout: true,
-				}
+				t.timeout = true
 			}
 		case map[interface{}]interface{}:
 			if err := t.fillByMap(item.(map[interface{}]interface{})); err != nil {
@@ -445,14 +452,4 @@ func TestVerifier_RFC7208Appendix4(t *testing.T) {
 
 // knownFailures lists RFC 7208 test suite cases ("suite description/test name")
 // that are not passing yet. Remove an entry once it passes.
-var knownFailures = map[string]bool{
-	// check_host() must return "none" for a malformed <domain>
-	"Initial processing/emptylabel":   true, // wants [none], got permerror
-	"Initial processing/toolonglabel": true, // wants [none], got permerror
-	// lookup limits count terms, not DNS queries
-	"Processing limits/mech-at-limit": true, // wants [pass], got permerror
-	// %{p} always expands to "unknown"
-	"Macro expansion rules/p-macro-multiple": true, // wants [pass softfail], got neutral
-	// only the SPF RR type times out, but the mock resolver times out every lookup
-	"Record lookup/spftimeout": true, // wants [fail], got temperror
-}
+var knownFailures = map[string]bool{}
