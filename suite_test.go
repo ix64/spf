@@ -156,10 +156,9 @@ func loadTestSuites(path string) ([]testSuite, error) {
 }
 
 func TestVerifier_Test(t *testing.T) {
-	return
 	suites, err := loadTestSuites("testdata/openspf-rfc7208-tests.yml")
 	if err != nil {
-		t.Errorf("Failed to load test suites: %s", err)
+		t.Fatalf("Failed to load test suites: %s", err)
 	}
 	for _, suite := range suites {
 		t.Run(suite.Description, func(t *testing.T) {
@@ -179,6 +178,16 @@ func TestVerifier_Test(t *testing.T) {
 							isOneOfExpect = true
 							break
 						}
+					}
+
+					key := suite.Description + "/" + tName
+					if knownFailures[key] {
+						if isOneOfExpect {
+							t.Errorf("known failure now passes, remove %q from knownFailures", key)
+						} else {
+							t.Skipf("known failure: wants %v, got %s", tt.Result, got)
+						}
+						return
 					}
 					if !isOneOfExpect {
 						t.Errorf("wants %v, got %s", tt.Result, got)
@@ -390,4 +399,66 @@ func TestVerifier_RFC7208Appendix4(t *testing.T) {
 
 	}
 
+}
+
+// knownFailures lists RFC 7208 test suite cases ("suite description/test name")
+// that are not passing yet. Remove an entry once it passes.
+var knownFailures = map[string]bool{
+	"A mechanism syntax/a-cidr6":                                      true, // wants [fail], got permerror
+	"A mechanism syntax/a-cidr6-0-ip4mapped":                          true, // wants [fail], got pass
+	"A mechanism syntax/a-colon-domain":                               true, // wants [pass], got permerror
+	"A mechanism syntax/a-colon-domain-ip4mapped":                     true, // wants [pass], got permerror
+	"A mechanism syntax/a-nxdomain":                                   true, // wants [fail], got permerror
+	"EXISTS mechanism syntax/exists-cidr":                             true, // wants [permerror], got neutral
+	"IP4 mechanism syntax/ip4-mapped-ip6":                             true, // wants [fail], got pass
+	"IP6 mechanism syntax/bare-ip6":                                   true, // wants [permerror], got fail
+	"IP6 mechanism syntax/cidr6-ip4":                                  true, // wants [neutral], got pass
+	"Include mechanism semantics and syntax/include-none":             true, // wants [permerror], got fail
+	"Initial processing/control-char-policy":                          true, // wants [permerror], got pass
+	"Initial processing/emptylabel":                                   true, // wants [none], got permerror
+	"Initial processing/non-ascii-non-spf":                            true, // wants [fail], got permerror
+	"Initial processing/toolonglabel":                                 true, // wants [none], got permerror
+	"Initial processing/trailing-space":                               true, // wants [fail], got permerror
+	"Initial processing/two-spaces":                                   true, // wants [fail], got permerror
+	"MX mechanism syntax/mx-cidr6-0-ip4mapped":                        true, // wants [fail], got pass
+	"MX mechanism syntax/mx-colon-domain":                             true, // wants [pass], got permerror
+	"MX mechanism syntax/mx-colon-domain-ip4mapped":                   true, // wants [pass], got permerror
+	"MX mechanism syntax/mx-empty":                                    true, // wants [neutral], got permerror
+	"MX mechanism syntax/mx-nxdomain":                                 true, // wants [fail], got none
+	"Macro expansion rules/exp-only-macro-char":                       true, // wants [permerror], got fail
+	"Macro expansion rules/hello-domain-literal":                      true, // wants [fail], got permerror
+	"Macro expansion rules/hello-macro":                               true, // wants [pass], got permerror
+	"Macro expansion rules/invalid-hello-macro":                       true, // wants [fail], got permerror
+	"Macro expansion rules/p-macro-multiple":                          true, // wants [pass softfail], got neutral
+	"Macro expansion rules/require-valid-helo":                        true, // wants [fail], got permerror
+	"PTR mechanism syntax/ptr-case-change":                            true, // wants [pass], got none
+	"PTR mechanism syntax/ptr-match-implicit":                         true, // wants [pass], got fail
+	"PTR mechanism syntax/ptr-match-ip6":                              true, // wants [pass], got none
+	"PTR mechanism syntax/ptr-match-target":                           true, // wants [pass], got fail
+	"Processing limits/mech-at-limit":                                 true, // wants [pass], got permerror
+	"Processing limits/void-at-limit":                                 true, // wants [neutral], got permerror
+	"Record evaluation/detect-errors-anywhere":                        true, // wants [permerror], got pass
+	"Record evaluation/modifier-charset-good":                         true, // wants [pass], got permerror
+	"Record evaluation/redirect-after-mechanisms2":                    true, // wants [fail], got permerror
+	"Record evaluation/redirect-is-modifier":                          true, // wants [permerror], got pass
+	"Record lookup/spfonly":                                           true, // wants [none], got fail
+	"Record lookup/spftimeout":                                        true, // wants [fail], got temperror
+	"Selecting records/case-insensitive":                              true, // wants [softfail], got neutral
+	"Selecting records/multispf2":                                     true, // wants [pass], got fail
+	"Selecting records/multitxt1":                                     true, // wants [permerror], got pass
+	"Selecting records/multitxt2":                                     true, // wants [permerror], got fail
+	"Selecting records/nospace1":                                      true, // wants [none], got neutral
+	"Selecting records/nospf":                                         true, // wants [none], got neutral
+	"Selecting records/spfoverride":                                   true, // wants [fail], got pass
+	"Semantics of exp and other modifiers/default-modifier-obsolete":  true, // wants [neutral], got permerror
+	"Semantics of exp and other modifiers/default-modifier-obsolete2": true, // wants [neutral], got permerror
+	"Semantics of exp and other modifiers/exp-empty-domain":           true, // wants [permerror], got fail
+	"Semantics of exp and other modifiers/exp-syntax-error":           true, // wants [permerror], got neutral
+	"Semantics of exp and other modifiers/exp-twice":                  true, // wants [permerror], got fail
+	"Semantics of exp and other modifiers/exp-void":                   true, // wants [fail], got permerror
+	"Semantics of exp and other modifiers/redirect-empty-domain":      true, // wants [permerror], got neutral
+	"Semantics of exp and other modifiers/redirect-syntax-error":      true, // wants [permerror], got neutral
+	"Semantics of exp and other modifiers/redirect-twice":             true, // wants [permerror], got fail
+	"Semantics of exp and other modifiers/unknown-modifier-syntax":    true, // wants [permerror], got fail
+	"Test cases from implementation bugs/bytes-bug":                   true, // wants [pass], got permerror
 }

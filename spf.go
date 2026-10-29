@@ -66,28 +66,49 @@ var discardLogger = log.New(io.Discard, "", 0)
 // ip is the remote IP address of current connection
 // helloDomain is the domain of the SMTP HELO command (only used for %{h} macro)
 func NewVerifier(sender string, ip netip.Addr, helloDomain string) *Verifier {
-	atIdx := strings.LastIndexByte(sender, '@')
+	senderLocal, senderDomain := splitSender(sender, helloDomain)
 	s := &Verifier{
-		sender:      sender,
-		localPart:   sender[atIdx+1:],
-		ip:          ip,
-		helloDomain: helloDomain,
-		ctx:         context.TODO(),
-		logger:      discardLogger,
-		timeout:     defaultSPFTimeout,
-		lookups:     0,
+		sender:       senderLocal + "@" + senderDomain,
+		senderLocal:  senderLocal,
+		senderDomain: senderDomain,
+		ip:           ip,
+		helloDomain:  helloDomain,
+		ctx:          context.TODO(),
+		logger:       discardLogger,
+		timeout:      defaultSPFTimeout,
+		lookups:      0,
 	}
-	s.checkDomain = s.localPart // for tests which not call checkHost()
+	s.checkDomain = s.senderDomain // for tests which not call checkHost()
 	s.SetResolver(net.DefaultResolver)
 	return s
 }
 
+// splitSender splits sender into local-part and domain.
+// A missing local-part is replaced by "postmaster",
+// and an empty domain (null reverse-path) falls back to helloDomain.
+// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.3
+// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-2.4
+func splitSender(sender, helloDomain string) (local, domain string) {
+	local, domain = "postmaster", sender
+	if atIdx := strings.LastIndexByte(sender, '@'); atIdx >= 0 {
+		domain = sender[atIdx+1:]
+		if atIdx > 0 {
+			local = sender[:atIdx]
+		}
+	}
+	if domain == "" {
+		domain = helloDomain
+	}
+	return local, domain
+}
+
 // Verifier for SPF Version 1
 type Verifier struct {
-	sender      string
-	localPart   string // extracted from sender
-	ip          netip.Addr
-	helloDomain string
+	sender       string // normalized as local-part@domain
+	senderLocal  string // local-part of sender
+	senderDomain string // domain of sender
+	ip           netip.Addr
+	helloDomain  string
 
 	resolver    *LimitResolver
 	timeout     time.Duration
@@ -128,7 +149,7 @@ func (s *Verifier) Test(ctx context.Context) (Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	s.ctx = ctx
 	defer cancel()
-	return s.checkHost(s.localPart)
+	return s.checkHost(s.senderDomain)
 }
 
 // checkHost checks the SPF record on the given domain
@@ -351,7 +372,7 @@ func (s *Verifier) parseHostDualCIDR(stmt string) (host string, v4Prefix int, v6
 		return "", 0, 0, errors.New("invalid host or dual-cidr expression")
 	}
 
-	host = s.localPart
+	host = s.senderDomain
 	if matches[1] != "" {
 		host, err = s.expandMacros(matches[1][1:])
 		if err != nil {
@@ -393,7 +414,7 @@ func (s *Verifier) checkIPDualCIDR(target, ipNet netip.Addr, v4Prefix int, v6Pre
 // ref: https://datatracker.ietf.org/doc/html/rfc7208#section-5.5
 func (s *Verifier) checkMechanismPTR(stmt string) (bool, *CheckError) {
 	// stmt example: ptr, ptr:example.com
-	host := s.localPart
+	host := s.senderDomain
 	if strings.HasPrefix(stmt, "ptr:") {
 		host = stmt[4:]
 	}
@@ -545,10 +566,9 @@ func (s *Verifier) getMacroValue(name string) (rs string, err error) {
 	case 's':
 		rs = s.sender
 	case 'l':
-		atIdx := strings.LastIndexByte(s.sender, '@')
-		rs = s.sender[:atIdx]
+		rs = s.senderLocal
 	case 'o':
-		rs = s.localPart
+		rs = s.senderDomain
 	case 'd':
 		rs = s.checkDomain
 	case 'i':
