@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"time"
 )
 
 // Resolver looks up the DNS records used by SPF. *net.Resolver implements it.
@@ -77,34 +78,71 @@ func (e *evaluation) lookupError(err error) error {
 	return wrapCheckError(err, ResultTempError, "")
 }
 
+// lookupStart returns the start time of a lookup, if lookups are logged.
+func (e *evaluation) lookupStart() time.Time {
+	if !e.logSteps {
+		return time.Time{}
+	}
+	return time.Now()
+}
+
+// logLookup logs a lookup that returned n records with err.
+// A name without records is not logged as an error.
+func (e *evaluation) logLookup(typ, name string, n int, err error, start time.Time) {
+	if !e.logSteps {
+		return
+	}
+	if isNotFound(err) {
+		err = nil
+	}
+	e.debug("spf: lookup", "type", typ, "name", name, "records", n,
+		"duration", time.Since(start), errAttr(err))
+}
+
 func (e *evaluation) lookupTXT(name string) ([]string, error) {
 	if err := e.beforeLookup(name); err != nil {
 		return nil, err
 	}
+	start := e.lookupStart()
 	rs, err := e.resolver.LookupTXT(e.ctx, name)
-	return rs, e.lookupError(err)
+	err = e.lookupError(err)
+	e.logLookup("TXT", name, len(rs), err, start)
+	return rs, err
 }
 
 func (e *evaluation) lookupNetIP(network, host string) ([]netip.Addr, error) {
 	if err := e.beforeLookup(host); err != nil {
 		return nil, err
 	}
+	start := e.lookupStart()
 	rs, err := e.resolver.LookupNetIP(e.ctx, network, host)
-	return rs, e.lookupError(err)
+	err = e.lookupError(err)
+	typ := "AAAA"
+	if network == "ip4" {
+		typ = "A"
+	}
+	e.logLookup(typ, host, len(rs), err, start)
+	return rs, err
 }
 
 func (e *evaluation) lookupMX(name string) ([]*net.MX, error) {
 	if err := e.beforeLookup(name); err != nil {
 		return nil, err
 	}
+	start := e.lookupStart()
 	rs, err := e.resolver.LookupMX(e.ctx, name)
-	return rs, e.lookupError(err)
+	err = e.lookupError(err)
+	e.logLookup("MX", name, len(rs), err, start)
+	return rs, err
 }
 
 func (e *evaluation) lookupAddr(addr netip.Addr) ([]string, error) {
 	if err := e.beforeLookup(""); err != nil {
 		return nil, err
 	}
+	start := e.lookupStart()
 	rs, err := e.resolver.LookupAddr(e.ctx, addr.String())
-	return rs, e.lookupError(err)
+	err = e.lookupError(err)
+	e.logLookup("PTR", addr.String(), len(rs), err, start)
+	return rs, err
 }

@@ -179,29 +179,70 @@ func TestChecker_Logger(t *testing.T) {
 			TXT: []string{"v=spf1 redirect=_spf.example.com"},
 		},
 		"_spf.example.com.": {
-			TXT: []string{"v=spf1 ip4:192.0.2.0/24 -all"},
+			TXT: []string{"v=spf1 ip4:192.0.2.0/24 -all exp=exp.example.com"},
+		},
+		"exp.example.com.": {
+			TXT: []string{"%{i} is not allowed"},
 		},
 	}}
-	var buf bytes.Buffer
-	c := &Checker{Resolver: resolver, Logger: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))}
-	c.CheckMailFrom(context.TODO(), netip.MustParseAddr("198.51.100.1"), "user@example.com", "helo.example.org")
+	check := func(level slog.Level) string {
+		var buf bytes.Buffer
+		// leave out the time and the durations, which vary
+		handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{
+			Level: level,
+			ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+				if a.Key == slog.TimeKey || a.Key == "duration" {
+					return slog.Attr{}
+				}
+				return a
+			},
+		})
+		c := &Checker{Resolver: resolver, Logger: slog.New(handler)}
+		c.CheckMailFrom(context.TODO(), netip.MustParseAddr("198.51.100.1"), "user@example.com", "helo.example.org")
+		return buf.String()
+	}
+	const tags = "identity=mailfrom sender=user@example.com ip=198.51.100.1"
 
+	debug := check(slog.LevelDebug)
 	for _, want := range []string{
-		`msg="spf: record" domain=example.com record="v=spf1 redirect=_spf.example.com"`,
-		`msg="spf: redirect" domain=example.com target=_spf.example.com`,
-		`msg="spf: mechanism" domain=_spf.example.com mechanism=ip4:192.0.2.0/24 matched=false`,
-		`msg="spf: mechanism" domain=_spf.example.com mechanism=-all matched=true`,
-		`msg="spf: result" identity=mailfrom sender=user@example.com ip=198.51.100.1 result=fail mechanism=-all`,
+		`level=DEBUG msg="spf: lookup" ` + tags + ` type=TXT name=example.com records=1` + "\n",
+		`level=DEBUG msg="spf: record" ` + tags + ` domain=example.com record="v=spf1 redirect=_spf.example.com"`,
+		`level=DEBUG msg="spf: redirect" ` + tags + ` domain=example.com target=_spf.example.com`,
+		`level=DEBUG msg="spf: mechanism" ` + tags + ` domain=_spf.example.com mechanism=ip4:192.0.2.0/24 matched=false`,
+		`level=DEBUG msg="spf: mechanism" ` + tags + ` domain=_spf.example.com mechanism=-all matched=true`,
+		`level=DEBUG msg="spf: lookup" ` + tags + ` type=TXT name=exp.example.com records=1` + "\n",
+		`level=INFO msg="spf: result" ` + tags + ` result=fail mechanism=-all explanation="198.51.100.1 is not allowed" lookups=1 void_lookups=0` + "\n",
 	} {
-		if !strings.Contains(buf.String(), want) {
-			t.Errorf("log does not contain %s\nlog:\n%s", want, buf.String())
+		if !strings.Contains(debug, want) {
+			t.Errorf("debug log does not contain %s\nlog:\n%s", want, debug)
 		}
 	}
-	if strings.Contains(buf.String(), "error=") {
-		t.Errorf("log contains an empty error attribute:\n%s", buf.String())
+	if strings.Contains(debug, "error=") {
+		t.Errorf("log contains an error attribute:\n%s", debug)
+	}
+
+	// the info level only has the result
+	info := check(slog.LevelInfo)
+	if strings.Count(info, "\n") != 1 || !strings.Contains(info, `level=INFO msg="spf: result" `+tags) {
+		t.Errorf("info log = %s, want only the result", info)
 	}
 
 	// a nil logger disables logging
-	c.Logger = nil
+	c := &Checker{Resolver: resolver}
 	c.CheckMailFrom(context.TODO(), netip.MustParseAddr("198.51.100.1"), "user@example.com", "helo.example.org")
+}
+
+// BenchmarkChecker_CheckMailFrom measures a check with logging disabled.
+func BenchmarkChecker_CheckMailFrom(b *testing.B) {
+	resolver := &mockdns.Resolver{Zones: map[string]mockdns.Zone{
+		"example.com.":      {TXT: []string{"v=spf1 include:_spf.example.com a:mail.example.com ip4:203.0.113.0/24 -all"}},
+		"_spf.example.com.": {TXT: []string{"v=spf1 ip4:198.51.100.0/24 ip4:198.51.101.0/24 -all"}},
+		"mail.example.com.": {A: []string{"203.0.113.9"}},
+	}}
+	c := &Checker{Resolver: resolver}
+	ip := netip.MustParseAddr("192.0.2.1")
+	b.ReportAllocs()
+	for b.Loop() {
+		c.CheckMailFrom(context.Background(), ip, "user@example.com", "mail.example.org")
+	}
 }

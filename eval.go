@@ -61,6 +61,7 @@ func stopsEvaluation(err error) bool {
 }
 
 // debug logs a step of the evaluation.
+// Callers check e.logSteps first, so no arguments are built when it's off.
 func (e *evaluation) debug(msg string, args ...any) {
 	e.logger.DebugContext(e.ctx, msg, args...)
 }
@@ -127,19 +128,27 @@ func (e *evaluation) envFor(domain string) *macroEnv {
 func (e *evaluation) checkHost(domain string) (Result, error) {
 	rec, err := e.lookupRecord(domain)
 	if err != nil {
-		e.debug("spf: record lookup failed", "domain", domain, errAttr(err))
+		if e.logSteps {
+			e.debug("spf: record lookup failed", "domain", domain, errAttr(err))
+		}
 		return resultOf(err), err
 	}
 	if rec == nil {
-		e.debug("spf: no record", "domain", domain)
+		if e.logSteps {
+			e.debug("spf: no record", "domain", domain)
+		}
 		return ResultNone, nil
 	}
-	e.debug("spf: record", "domain", domain, "record", rec.String())
+	if e.logSteps {
+		e.debug("spf: record", "domain", domain, "record", rec.String())
+	}
 
 	env := e.envFor(domain)
 	for _, d := range rec.Directives {
 		matched, err := e.match(d.Mechanism, env)
-		e.debug("spf: mechanism", "domain", domain, "mechanism", d.String(), "matched", matched, errAttr(err))
+		if e.logSteps {
+			e.debug("spf: mechanism", "domain", domain, "mechanism", d.String(), "matched", matched, errAttr(err))
+		}
 		if err != nil {
 			return resultOf(err), err
 		}
@@ -166,7 +175,9 @@ func (e *evaluation) checkHost(domain string) (Result, error) {
 		if err != nil {
 			return resultOf(err), err
 		}
-		e.debug("spf: redirect", "domain", domain, "target", target)
+		if e.logSteps {
+			e.debug("spf: redirect", "domain", domain, "target", target)
+		}
 		result, err := e.checkHost(target)
 		// if no SPF record is found, or if the <target-name> is malformed,
 		// the result is a "permerror" rather than "none".
@@ -236,7 +247,9 @@ func (e *evaluation) match(m Mechanism, env *macroEnv) (bool, error) {
 		// such terms do not match anything
 		// ref: https://datatracker.ietf.org/doc/html/rfc8616#section-4
 		if !isASCII(target) {
-			e.debug("spf: non-ASCII target", "domain", env.domain, "target", target)
+			if e.logSteps {
+				e.debug("spf: non-ASCII target", "domain", env.domain, "target", target)
+			}
 			return false, nil
 		}
 	}
@@ -306,12 +319,16 @@ func (e *evaluation) explain(spec MacroString, env *macroEnv) string {
 	// the lookup does not count toward the lookup limits
 	txts, err := e.lookupTXT(domain)
 	if err != nil || len(txts) != 1 {
-		e.debug("spf: no explanation", "domain", domain, "records", len(txts), errAttr(err))
+		if e.logSteps {
+			e.debug("spf: no explanation", "domain", domain, "records", len(txts), errAttr(err))
+		}
 		return ""
 	}
 	m, err := parseExplanation(txts[0])
 	if err != nil {
-		e.debug("spf: invalid explanation", "domain", domain, errAttr(err))
+		if e.logSteps {
+			e.debug("spf: invalid explanation", "domain", domain, errAttr(err))
+		}
 		return ""
 	}
 	text, err := m.expand(env)
