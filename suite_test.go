@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/foxcpp/go-mockdns"
@@ -46,7 +47,22 @@ func (t *testResult) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return fmt.Errorf("unable to unmarshal test result")
 }
 
-type testZoneRecord mockdns.Zone
+// testZoneRecord holds the records of a name in the test suite zone data.
+// SPF records are served as TXT records, unless the name has its own TXT records.
+// A TXT record "NONE" means the name has no TXT records.
+type testZoneRecord struct {
+	mockdns.Zone
+	spf    []string
+	hasTXT bool
+}
+
+func (t *testZoneRecord) zone() mockdns.Zone {
+	zone := t.Zone
+	if !t.hasTXT {
+		zone.TXT = t.spf
+	}
+	return zone
+}
 
 func (t *testZoneRecord) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	var items []interface{}
@@ -100,8 +116,13 @@ func (t *testZoneRecord) fillByMap(m map[interface{}]interface{}) error {
 		}
 
 		switch k {
-		case "SPF", "TXT":
-			t.TXT = append(t.TXT, str)
+		case "SPF":
+			t.spf = append(t.spf, str)
+		case "TXT":
+			t.hasTXT = true
+			if str != "NONE" {
+				t.TXT = append(t.TXT, str)
+			}
 		case "A":
 			t.A = append(t.A, str)
 		case "AAAA":
@@ -164,12 +185,12 @@ func TestVerifier_Test(t *testing.T) {
 		t.Run(suite.Description, func(t *testing.T) {
 			r := &mockdns.Resolver{Zones: make(map[string]mockdns.Zone)}
 			for s, record := range suite.ZoneData {
-				r.Zones[dns.Fqdn(s)] = mockdns.Zone(record)
+				r.Zones[strings.ToLower(dns.Fqdn(s))] = record.zone()
 			}
 			for tName, tt := range suite.Tests {
 				t.Run(tName, func(t *testing.T) {
 					v := NewVerifier(tt.MailFrom, netip.MustParseAddr(tt.Host), tt.Helo)
-					v.SetResolver(r)
+					v.SetResolver(lowerCaseResolver{r})
 					got, err := v.Test(context.TODO())
 
 					isOneOfExpect := false
@@ -202,6 +223,24 @@ func TestVerifier_Test(t *testing.T) {
 		})
 
 	}
+}
+
+// lowerCaseResolver makes lookups case-insensitive like DNS,
+// for zone data with lower-cased names.
+type lowerCaseResolver struct {
+	DNSResolver
+}
+
+func (r lowerCaseResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
+	return r.DNSResolver.LookupTXT(ctx, strings.ToLower(name))
+}
+
+func (r lowerCaseResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	return r.DNSResolver.LookupNetIP(ctx, network, strings.ToLower(host))
+}
+
+func (r lowerCaseResolver) LookupMX(ctx context.Context, name string) ([]*net.MX, error) {
+	return r.DNSResolver.LookupMX(ctx, strings.ToLower(name))
 }
 
 func loadMockResolver(zf string) (*mockdns.Resolver, error) {
@@ -279,7 +318,8 @@ func TestVerifier_RFC7208Appendix1(t *testing.T) {
 		{"v=spf1 a -all", "192.0.2.10", ResultPass},
 		{"v=spf1 a -all", "192.0.2.11", ResultPass},
 
-		{"v=spf1 a:example.org -all", "192.0.2.11", ResultPermError},
+		// no sending hosts as there are no A RRs for example.org
+		{"v=spf1 a:example.org -all", "192.0.2.11", ResultFail},
 
 		{"v=spf1 mx -all", "192.0.2.129", ResultPass},
 		{"v=spf1 mx -all", "192.0.2.130", ResultPass},
@@ -379,7 +419,9 @@ func TestVerifier_RFC7208Appendix4(t *testing.T) {
 	}
 	addMockSPFRecord(resolver, "example.com.", "v=spf1 -include:ip4._spf.%{d} -include:ptr._spf.%{d} +all")
 	addMockSPFRecord(resolver, "ip4._spf.example.com.", "v=spf1 -ip4:192.0.2.0/24 +all")
-	addMockSPFRecord(resolver, "ptr._spf.example.com.", "v=spf1 -ptr +all")
+	// The RFC example uses "-ptr", whose <target-name> is the <domain> being checked,
+	// i.e. "ptr._spf.example.com" when included. Name the sender domain explicitly instead.
+	addMockSPFRecord(resolver, "ptr._spf.example.com.", "v=spf1 -ptr:%{o} +all")
 
 	cases := []SPFTestCase{
 		{"mary@example.com", netip.MustParseAddr("192.0.2.10"), "example.net", ResultPass},
@@ -404,61 +446,13 @@ func TestVerifier_RFC7208Appendix4(t *testing.T) {
 // knownFailures lists RFC 7208 test suite cases ("suite description/test name")
 // that are not passing yet. Remove an entry once it passes.
 var knownFailures = map[string]bool{
-	"A mechanism syntax/a-cidr6":                                      true, // wants [fail], got permerror
-	"A mechanism syntax/a-cidr6-0-ip4mapped":                          true, // wants [fail], got pass
-	"A mechanism syntax/a-colon-domain":                               true, // wants [pass], got permerror
-	"A mechanism syntax/a-colon-domain-ip4mapped":                     true, // wants [pass], got permerror
-	"A mechanism syntax/a-nxdomain":                                   true, // wants [fail], got permerror
-	"EXISTS mechanism syntax/exists-cidr":                             true, // wants [permerror], got neutral
-	"IP4 mechanism syntax/ip4-mapped-ip6":                             true, // wants [fail], got pass
-	"IP6 mechanism syntax/bare-ip6":                                   true, // wants [permerror], got fail
-	"IP6 mechanism syntax/cidr6-ip4":                                  true, // wants [neutral], got pass
-	"Include mechanism semantics and syntax/include-none":             true, // wants [permerror], got fail
-	"Initial processing/control-char-policy":                          true, // wants [permerror], got pass
-	"Initial processing/emptylabel":                                   true, // wants [none], got permerror
-	"Initial processing/non-ascii-non-spf":                            true, // wants [fail], got permerror
-	"Initial processing/toolonglabel":                                 true, // wants [none], got permerror
-	"Initial processing/trailing-space":                               true, // wants [fail], got permerror
-	"Initial processing/two-spaces":                                   true, // wants [fail], got permerror
-	"MX mechanism syntax/mx-cidr6-0-ip4mapped":                        true, // wants [fail], got pass
-	"MX mechanism syntax/mx-colon-domain":                             true, // wants [pass], got permerror
-	"MX mechanism syntax/mx-colon-domain-ip4mapped":                   true, // wants [pass], got permerror
-	"MX mechanism syntax/mx-empty":                                    true, // wants [neutral], got permerror
-	"MX mechanism syntax/mx-nxdomain":                                 true, // wants [fail], got none
-	"Macro expansion rules/exp-only-macro-char":                       true, // wants [permerror], got fail
-	"Macro expansion rules/hello-domain-literal":                      true, // wants [fail], got permerror
-	"Macro expansion rules/hello-macro":                               true, // wants [pass], got permerror
-	"Macro expansion rules/invalid-hello-macro":                       true, // wants [fail], got permerror
-	"Macro expansion rules/p-macro-multiple":                          true, // wants [pass softfail], got neutral
-	"Macro expansion rules/require-valid-helo":                        true, // wants [fail], got permerror
-	"PTR mechanism syntax/ptr-case-change":                            true, // wants [pass], got none
-	"PTR mechanism syntax/ptr-match-implicit":                         true, // wants [pass], got fail
-	"PTR mechanism syntax/ptr-match-ip6":                              true, // wants [pass], got none
-	"PTR mechanism syntax/ptr-match-target":                           true, // wants [pass], got fail
-	"Processing limits/mech-at-limit":                                 true, // wants [pass], got permerror
-	"Processing limits/void-at-limit":                                 true, // wants [neutral], got permerror
-	"Record evaluation/detect-errors-anywhere":                        true, // wants [permerror], got pass
-	"Record evaluation/modifier-charset-good":                         true, // wants [pass], got permerror
-	"Record evaluation/redirect-after-mechanisms2":                    true, // wants [fail], got permerror
-	"Record evaluation/redirect-is-modifier":                          true, // wants [permerror], got pass
-	"Record lookup/spfonly":                                           true, // wants [none], got fail
-	"Record lookup/spftimeout":                                        true, // wants [fail], got temperror
-	"Selecting records/case-insensitive":                              true, // wants [softfail], got neutral
-	"Selecting records/multispf2":                                     true, // wants [pass], got fail
-	"Selecting records/multitxt1":                                     true, // wants [permerror], got pass
-	"Selecting records/multitxt2":                                     true, // wants [permerror], got fail
-	"Selecting records/nospace1":                                      true, // wants [none], got neutral
-	"Selecting records/nospf":                                         true, // wants [none], got neutral
-	"Selecting records/spfoverride":                                   true, // wants [fail], got pass
-	"Semantics of exp and other modifiers/default-modifier-obsolete":  true, // wants [neutral], got permerror
-	"Semantics of exp and other modifiers/default-modifier-obsolete2": true, // wants [neutral], got permerror
-	"Semantics of exp and other modifiers/exp-empty-domain":           true, // wants [permerror], got fail
-	"Semantics of exp and other modifiers/exp-syntax-error":           true, // wants [permerror], got neutral
-	"Semantics of exp and other modifiers/exp-twice":                  true, // wants [permerror], got fail
-	"Semantics of exp and other modifiers/exp-void":                   true, // wants [fail], got permerror
-	"Semantics of exp and other modifiers/redirect-empty-domain":      true, // wants [permerror], got neutral
-	"Semantics of exp and other modifiers/redirect-syntax-error":      true, // wants [permerror], got neutral
-	"Semantics of exp and other modifiers/redirect-twice":             true, // wants [permerror], got fail
-	"Semantics of exp and other modifiers/unknown-modifier-syntax":    true, // wants [permerror], got fail
-	"Test cases from implementation bugs/bytes-bug":                   true, // wants [pass], got permerror
+	// check_host() must return "none" for a malformed <domain>
+	"Initial processing/emptylabel":   true, // wants [none], got permerror
+	"Initial processing/toolonglabel": true, // wants [none], got permerror
+	// lookup limits count terms, not DNS queries
+	"Processing limits/mech-at-limit": true, // wants [pass], got permerror
+	// %{p} always expands to "unknown"
+	"Macro expansion rules/p-macro-multiple": true, // wants [pass softfail], got neutral
+	// only the SPF RR type times out, but the mock resolver times out every lookup
+	"Record lookup/spftimeout": true, // wants [fail], got temperror
 }
