@@ -345,6 +345,7 @@ func Test_isDomainName(t *testing.T) {
 
 		{"", false},
 		{"..", false},
+		{"bücher.example", false}, // U-labels must be converted first
 		{".example.com", false},
 		{"a..example.com", false},
 		{strings.Repeat("a", 64) + ".com", false},
@@ -354,5 +355,69 @@ func Test_isDomainName(t *testing.T) {
 		if got := isDomainName(tt.name); got != tt.want {
 			t.Errorf("isDomainName(%q) = %v, want %v (len %d)", tt.name, got, tt.want, len(tt.name))
 		}
+	}
+}
+
+// recordingResolver records the names looked up.
+type recordingResolver struct {
+	*mockdns.Resolver
+	names []string
+}
+
+func (r *recordingResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
+	r.names = append(r.names, name)
+	return r.Resolver.LookupTXT(ctx, name)
+}
+
+func (r *recordingResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	r.names = append(r.names, host)
+	return r.Resolver.LookupNetIP(ctx, network, host)
+}
+
+// internationalized domains are checked with A-labels, and terms with a
+// non-ASCII local-part do not match
+// ref: https://datatracker.ietf.org/doc/html/rfc8616#section-4
+func TestChecker_internationalized(t *testing.T) {
+	zones := map[string]mockdns.Zone{
+		"xn--bcher-kva.example.":                  {TXT: []string{"v=spf1 exists:%{d}.list.example.net -all"}},
+		"xn--bcher-kva.example.list.example.net.": {A: []string{"127.0.0.2"}},
+		"local.example.": {TXT: []string{
+			"v=spf1 exists:%{l}.a.example.net exists:%{l}.b.example.net exists:%{l}.c.example.net -all",
+		}},
+	}
+	ip := netip.MustParseAddr("192.0.2.1")
+	tests := []struct {
+		name       string
+		check      func(c *Checker) *Outcome
+		want       Result
+		wantSender string
+	}{
+		{"MAIL FROM", func(c *Checker) *Outcome {
+			return c.CheckMailFrom(context.TODO(), ip, "user@Bücher.example", "mail.example.com")
+		}, ResultPass, "user@xn--bcher-kva.example"},
+		{"HELO", func(c *Checker) *Outcome {
+			return c.CheckHelo(context.TODO(), ip, "bücher.example")
+		}, ResultPass, "postmaster@xn--bcher-kva.example"},
+		{"invalid label", func(c *Checker) *Outcome {
+			return c.CheckMailFrom(context.TODO(), ip, "user@\u0301abc.example", "mail.example.com")
+		}, ResultNone, "user@\u0301abc.example"},
+		// three void lookups would give permerror
+		{"non-ASCII local-part", func(c *Checker) *Outcome {
+			return c.CheckMailFrom(context.TODO(), ip, "jörg@local.example", "mail.example.com")
+		}, ResultFail, "jörg@local.example"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &recordingResolver{Resolver: &mockdns.Resolver{Zones: zones}}
+			o := tt.check(&Checker{Resolver: r})
+			if o.Result != tt.want || o.Sender != tt.wantSender {
+				t.Errorf("got (%s, %q), want (%s, %q), problem: %v", o.Result, o.Sender, tt.want, tt.wantSender, o.Problem)
+			}
+			for _, name := range r.names {
+				if !isASCII(name) {
+					t.Errorf("looked up non-ASCII name %q", name)
+				}
+			}
+		})
 	}
 }
