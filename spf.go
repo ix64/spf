@@ -2,7 +2,6 @@ package spf
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log"
 	"net"
@@ -12,8 +11,6 @@ import (
 
 	"github.com/miekg/dns"
 )
-
-//todo: add Received-SPF header generation
 
 // Qualifier for SPF DNS record's directive https://datatracker.ietf.org/doc/html/rfc7208#section-4.6.2
 type Qualifier byte
@@ -60,10 +57,11 @@ var discardLogger = log.New(io.Discard, "", 0)
 // NewVerifier creates a new SPF Verifier
 // sender is the email address of the sender (we don't check if it's valid)
 // ip is the remote IP address of current connection
-// helloDomain is the domain of the SMTP HELO command (only used for %{h} macro)
+// helloDomain is the domain of the SMTP HELO/EHLO command
 func NewVerifier(sender string, ip netip.Addr, helloDomain string) *Verifier {
 	senderLocal, senderDomain := splitSender(sender, helloDomain)
 	s := &Verifier{
+		mailFrom:     sender,
 		sender:       senderLocal + "@" + senderDomain,
 		senderLocal:  senderLocal,
 		senderDomain: senderDomain,
@@ -98,8 +96,11 @@ func splitSender(sender, helloDomain string) (local, domain string) {
 	return local, domain
 }
 
-// Verifier for SPF Version 1
+// Verifier for SPF Version 1.
+// A Verifier is not modified by checks, so it can be used by several goroutines
+// once it's configured.
 type Verifier struct {
+	mailFrom     string // sender as given
 	sender       string // normalized as local-part@domain
 	senderLocal  string // local-part of sender
 	senderDomain string // domain of sender
@@ -110,6 +111,7 @@ type Verifier struct {
 	timeout     time.Duration
 	logger      *log.Logger
 	lookupLimit int
+	receiver    string
 }
 
 func (s *Verifier) SetResolver(resolver DNSResolver) {
@@ -141,22 +143,65 @@ func (s *Verifier) SetTimeout(t time.Duration) {
 	s.timeout = t
 }
 
+// SetReceiver sets the domain name of the host performing the check,
+// used for the %{r} macro and in Received-SPF headers.
+func (s *Verifier) SetReceiver(receiver string) {
+	s.receiver = receiver
+}
+
+// Test checks the MAIL FROM identity, returning the result and the problem
+// behind ResultTempError or ResultPermError. Use Check for the full Outcome.
 func (s *Verifier) Test(ctx context.Context) (Result, error) {
-	// for now, we support SMTP HELO with domain only
-	// todo: support SMTP HELO with address-literal
-	// ref: https://www.rfc-editor.org/rfc/rfc5321#section-4.1.1.1
-	if _, ok := dns.IsDomainName(s.helloDomain); !ok {
-		return ResultFail, errors.New("hello domain is not a domain")
+	o := s.Check(ctx)
+	return o.Result, o.Problem
+}
+
+// Check checks the MAIL FROM identity.
+// When the MAIL FROM is empty, this checks "postmaster@" + helloDomain.
+// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-2.4
+func (s *Verifier) Check(ctx context.Context) *Outcome {
+	return s.check(ctx, IdentityMailFrom)
+}
+
+// CheckHelo checks the HELO identity, which is recommended before checking
+// MAIL FROM; a "pass" for HELO may make the MAIL FROM check unnecessary.
+// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-2.3
+func (s *Verifier) CheckHelo(ctx context.Context) *Outcome {
+	return s.check(ctx, IdentityHelo)
+}
+
+func (s *Verifier) check(ctx context.Context, identity Identity) *Outcome {
+	v := s
+	if identity == IdentityHelo {
+		helo := *s
+		helo.senderLocal, helo.senderDomain = "postmaster", s.helloDomain
+		helo.sender = helo.senderLocal + "@" + helo.senderDomain
+		v = &helo
 	}
 
-	if !isValidDomain(s.senderDomain) {
-		return ResultNone, nil
+	o := &Outcome{
+		Result:   ResultNone,
+		Identity: identity,
+		Sender:   v.sender,
+		MailFrom: s.mailFrom,
+		ClientIP: s.ip,
+		Helo:     s.helloDomain,
+		Receiver: s.receiver,
+	}
+	// a HELO with an address literal is not a valid domain either
+	if !isValidDomain(v.senderDomain) {
+		return o
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	e := &evaluation{Verifier: s, ctx: ctx}
-	return e.checkHost(s.senderDomain)
+	e := &evaluation{Verifier: v, ctx: ctx}
+	o.Result, o.Problem = e.checkHost(v.senderDomain)
+	o.Mechanism = e.mechanism
+	if o.Result == ResultFail {
+		o.Explanation = e.explanation
+	}
+	return o
 }
 
 // isValidDomain reports whether domain is a well-formed multi-label domain name,
@@ -188,5 +233,7 @@ func (s *Verifier) env(domain string) *macroEnv {
 		domain:       domain,
 		ip:           s.ip,
 		helloDomain:  s.helloDomain,
+		receiver:     s.receiver,
+		now:          time.Now(),
 	}
 }

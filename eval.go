@@ -18,6 +18,10 @@ type evaluation struct {
 
 	ptrNames     []string // validated domain names of <ip>, for %{p}
 	ptrNamesDone bool
+
+	includeDepth int    // records checked by "include", their matches are not the result
+	mechanism    string // directive that produced the result
+	explanation  string // explanation of a "fail"
 }
 
 // maxVoidLookups is the number of lookups allowed to return no records.
@@ -126,14 +130,16 @@ func (e *evaluation) checkHost(domain string) (Result, error) {
 			return resultOf(err), err
 		}
 		if matched {
-			return d.Qualifier.result(), nil
+			result := d.Qualifier.result()
+			// "exp" of an included record or of a record redirecting elsewhere is not used
+			if e.includeDepth == 0 {
+				e.mechanism = d.String()
+				if result == ResultFail && rec.Exp != nil {
+					e.explanation = e.explain(*rec.Exp, env)
+				}
+			}
+			return result, nil
 		}
-	}
-
-	if rec.Exp != nil {
-		// modifier "exp" (explanation)
-		// https://datatracker.ietf.org/doc/html/rfc7208#section-6.2
-		e.logger.Println("modifier(exp): ignored") // we are not supporting it for now
 	}
 
 	// If all mechanisms fail to match, and a "redirect" modifier is present
@@ -248,7 +254,9 @@ func domainSpec(m Mechanism) *MacroString {
 // matchInclude processes a mechanism "include"
 // https://datatracker.ietf.org/doc/html/rfc7208#section-5.2
 func (e *evaluation) matchInclude(host string) (bool, error) {
+	e.includeDepth++
 	r, err := e.checkHost(host)
+	e.includeDepth--
 	switch r {
 	case ResultPass:
 		return true, nil
@@ -261,6 +269,32 @@ func (e *evaluation) matchInclude(host string) (bool, error) {
 	default:
 		return false, WrapCheckError(err, ResultPermError, "check include host failed")
 	}
+}
+
+// explain returns the explanation string of the "exp" modifier,
+// or "" if it can't be computed for any reason.
+// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-6.2
+func (e *evaluation) explain(spec MacroString, env *macroEnv) string {
+	domain, err := spec.expandDomain(env)
+	if err != nil {
+		return ""
+	}
+	// the lookup does not count toward the lookup limits
+	txts, err := e.lookupTXT(domain)
+	if err != nil || len(txts) != 1 {
+		e.logger.Printf("modifier(exp): no explanation from %s: %v", domain, err)
+		return ""
+	}
+	m, err := parseExplanation(txts[0])
+	if err != nil {
+		e.logger.Printf("modifier(exp): invalid explanation from %s: %v", domain, err)
+		return ""
+	}
+	text, err := m.expand(env)
+	if err != nil {
+		return ""
+	}
+	return text
 }
 
 // lookupAddrs returns the addresses of host in the same family as <ip>.
