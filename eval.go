@@ -13,14 +13,28 @@ type evaluation struct {
 	*Verifier
 	ctx context.Context
 
+	lookups     int // terms that caused DNS lookups
 	voidLookups int // lookups that returned no records
+
+	ptrNames     []string // validated domain names of <ip>, for %{p}
+	ptrNamesDone bool
 }
 
 // maxVoidLookups is the number of lookups allowed to return no records.
 // ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.6.4
 const maxVoidLookups = 2
 
+// maxMXNames is the number of MX names allowed for a "mx" mechanism.
+// maxPTRNames is the number of PTR names used, the rest are ignored.
+// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.6.4
+const (
+	maxMXNames  = 10
+	maxPTRNames = 10
+)
+
+var limitExceededAmount = NewCheckError(ResultPermError, "dns: query limit exceeded (amount)")
 var limitExceededVoid = NewCheckError(ResultPermError, "dns: void lookup limit exceeded")
+var limitExceededMX = NewCheckError(ResultPermError, "dns: too many MX records")
 
 // resultOf returns the SPF result carried by err.
 func resultOf(err error) Result {
@@ -41,6 +55,16 @@ func isLimitExceeded(err error) bool {
 	return errors.Is(err, limitExceededAmount) ||
 		errors.Is(err, limitExceededDeadline) ||
 		errors.Is(err, limitExceededVoid)
+}
+
+// countLookup counts a term that causes DNS lookups,
+// and returns an error once there are more than the lookup limit.
+func (e *evaluation) countLookup() error {
+	e.lookups++
+	if e.lookups > e.lookupLimit {
+		return limitExceededAmount
+	}
+	return nil
 }
 
 // checkVoid classifies a lookup that returned n records with err.
@@ -73,6 +97,15 @@ func (q Qualifier) result() Result {
 	}
 }
 
+// envFor returns the macro values while checking domain.
+func (e *evaluation) envFor(domain string) *macroEnv {
+	env := e.env(domain)
+	env.validatedName = func() (string, error) {
+		return e.validatedName(domain)
+	}
+	return env
+}
+
 // checkHost checks the SPF record on the given domain
 // ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4
 func (e *evaluation) checkHost(domain string) (Result, error) {
@@ -84,7 +117,7 @@ func (e *evaluation) checkHost(domain string) (Result, error) {
 		return ResultNone, nil
 	}
 
-	env := e.env(domain)
+	env := e.envFor(domain)
 	for _, d := range rec.Directives {
 		e.logger.Printf("mechanism start(%s)", d)
 		matched, err := e.match(d.Mechanism, env)
@@ -106,7 +139,13 @@ func (e *evaluation) checkHost(domain string) (Result, error) {
 	// If all mechanisms fail to match, and a "redirect" modifier is present
 	// https://datatracker.ietf.org/doc/html/rfc7208#section-6.1
 	if rec.Redirect != nil {
-		target := rec.Redirect.expandDomain(env)
+		if err := e.countLookup(); err != nil {
+			return resultOf(err), err
+		}
+		target, err := rec.Redirect.expandDomain(env)
+		if err != nil {
+			return resultOf(err), err
+		}
 		e.logger.Printf("modifier(redirect): %s", target)
 		result, err := e.checkHost(target)
 		// if no SPF record is found, or if the <target-name> is malformed,
@@ -123,7 +162,7 @@ func (e *evaluation) checkHost(domain string) (Result, error) {
 // ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.4
 // ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.5
 func (e *evaluation) lookupRecord(domain string) (*Record, error) {
-	txts, err := e.resolver.LookupTXT(e.ctx, domain)
+	txts, err := e.lookupTXT(domain)
 	if err != nil {
 		if isNotFound(err) {
 			return nil, nil
@@ -156,29 +195,54 @@ func (e *evaluation) match(m Mechanism, env *macroEnv) (bool, error) {
 	switch m := m.(type) {
 	case MechanismAll:
 		return true, nil
-	case MechanismInclude:
-		return e.matchInclude(m.Domain.expandDomain(env))
-	case MechanismA:
-		return e.matchA(targetName(m.Domain, env), m.CIDR)
-	case MechanismMX:
-		return e.matchMX(targetName(m.Domain, env), m.CIDR)
-	case MechanismPTR:
-		return e.matchPTR(targetName(m.Domain, env))
 	case MechanismIP:
 		return m.Prefix.Contains(e.ip), nil
+	}
+
+	// the other mechanisms cause DNS lookups
+	if err := e.countLookup(); err != nil {
+		return false, err
+	}
+	target := env.domain
+	if spec := domainSpec(m); spec != nil {
+		var err error
+		if target, err = spec.expandDomain(env); err != nil {
+			return false, err
+		}
+	}
+
+	switch m := m.(type) {
+	case MechanismInclude:
+		return e.matchInclude(target)
+	case MechanismA:
+		return e.matchA(target, m.CIDR)
+	case MechanismMX:
+		return e.matchMX(target, m.CIDR)
+	case MechanismPTR:
+		return e.matchPTR(target)
 	case MechanismExists:
-		return e.matchExists(m.Domain.expandDomain(env))
+		return e.matchExists(target)
 	default: // should not happen
 		return false, NewCheckError(ResultPermError, fmt.Sprintf("unknown mechanism %T", m))
 	}
 }
 
-// targetName returns the expanded domain-spec, or <domain> if it's absent.
-func targetName(spec *MacroString, env *macroEnv) string {
-	if spec == nil {
-		return env.domain
+// domainSpec returns the domain-spec of a mechanism, nil means <domain>.
+func domainSpec(m Mechanism) *MacroString {
+	switch m := m.(type) {
+	case MechanismInclude:
+		return &m.Domain
+	case MechanismExists:
+		return &m.Domain
+	case MechanismA:
+		return m.Domain
+	case MechanismMX:
+		return m.Domain
+	case MechanismPTR:
+		return m.Domain
+	default:
+		return nil
 	}
-	return spec.expandDomain(env)
 }
 
 // matchInclude processes a mechanism "include"
@@ -205,7 +269,7 @@ func (e *evaluation) lookupAddrs(host string) ([]netip.Addr, error) {
 	if e.ip.Is4() {
 		network = "ip4"
 	}
-	return e.resolver.LookupNetIP(e.ctx, network, host)
+	return e.lookupNetIP(network, host)
 }
 
 // inNetworks reports whether <ip> is in the network of any address.
@@ -236,9 +300,12 @@ func (e *evaluation) matchA(host string, cidr DualCIDR) (bool, error) {
 // matchMX processes a mechanism "mx".
 // ref: https://datatracker.ietf.org/doc/html/rfc7208#section-5.4
 func (e *evaluation) matchMX(host string, cidr DualCIDR) (bool, error) {
-	mxs, err := e.resolver.LookupMX(e.ctx, host)
+	mxs, err := e.lookupMX(host)
 	if void, err := e.checkVoid(len(mxs), err); void || err != nil {
 		return false, err
+	}
+	if len(mxs) > maxMXNames {
+		return false, limitExceededMX
 	}
 
 	for _, mx := range mxs {
@@ -259,43 +326,84 @@ func (e *evaluation) matchMX(host string, cidr DualCIDR) (bool, error) {
 	return false, nil
 }
 
-// maxPTRNames is the number of PTR names used, the rest are ignored.
-// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.6.4
-const maxPTRNames = 10
-
 // matchPTR processes a mechanism "ptr".
 // ref: https://datatracker.ietf.org/doc/html/rfc7208#section-5.5
 func (e *evaluation) matchPTR(target string) (bool, error) {
-	names, err := e.resolver.LookupAddr(e.ctx, e.ip.String())
+	names, err := e.validatedNames(func(name string) bool {
+		return isSubdomain(name, target)
+	})
+	return len(names) > 0, err
+}
+
+// validatedNames returns the validated domain names of <ip>,
+// i.e. names whose addresses include <ip>, trying only names accepted by want.
+// A DNS error, other than exceeding a limit, only leaves names out.
+// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-5.5
+func (e *evaluation) validatedNames(want func(name string) bool) ([]string, error) {
+	names, err := e.lookupAddr(e.ip)
 	if void, err := e.checkVoid(len(names), err); void || err != nil {
-		// a DNS error on the PTR lookup makes the mechanism fail to match
 		if isLimitExceeded(err) {
-			return false, err
+			return nil, err
 		}
-		return false, nil
+		return nil, nil
 	}
 	if len(names) > maxPTRNames {
 		names = names[:maxPTRNames]
 	}
 
+	var validated []string
 	for _, name := range names {
-		if !isSubdomain(name, target) {
+		if !want(name) {
 			continue
 		}
 		addrs, err := e.lookupAddrs(name)
 		if void, err := e.checkVoid(len(addrs), err); void || err != nil {
 			if isLimitExceeded(err) {
-				return false, err
+				return nil, err
 			}
 			continue
 		}
 		for _, addr := range addrs {
 			if addr.Unmap() == e.ip {
-				return true, nil
+				validated = append(validated, name)
+				break
 			}
 		}
 	}
-	return false, nil
+	return validated, nil
+}
+
+// validatedName returns the value of the %{p} macro while checking domain:
+// domain itself if it's validated, else a validated subdomain of it,
+// else any validated name, else "unknown".
+// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-7.3
+func (e *evaluation) validatedName(domain string) (string, error) {
+	if !e.ptrNamesDone {
+		// the PTR lookup counts toward the lookup limit
+		if err := e.countLookup(); err != nil {
+			return "", err
+		}
+		names, err := e.validatedNames(func(string) bool { return true })
+		if err != nil {
+			return "", err
+		}
+		e.ptrNames, e.ptrNamesDone = names, true
+	}
+
+	if len(e.ptrNames) == 0 {
+		return "unknown", nil
+	}
+	for _, name := range e.ptrNames {
+		if strings.EqualFold(strings.TrimSuffix(name, "."), strings.TrimSuffix(domain, ".")) {
+			return strings.TrimSuffix(name, "."), nil
+		}
+	}
+	for _, name := range e.ptrNames {
+		if isSubdomain(name, domain) {
+			return strings.TrimSuffix(name, "."), nil
+		}
+	}
+	return strings.TrimSuffix(e.ptrNames[0], "."), nil
 }
 
 // isSubdomain reports whether name is parent or a subdomain of it.
@@ -310,7 +418,7 @@ func isSubdomain(name, parent string) bool {
 func (e *evaluation) matchExists(host string) (bool, error) {
 	// domain is used for a DNS A RR lookup
 	// (even when the connection type is IPv6)
-	addrs, err := e.resolver.LookupNetIP(e.ctx, "ip4", host)
+	addrs, err := e.lookupNetIP("ip4", host)
 	if void, err := e.checkVoid(len(addrs), err); void || err != nil {
 		return false, err
 	}

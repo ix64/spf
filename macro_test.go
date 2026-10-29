@@ -84,7 +84,11 @@ func TestMacroString_expand(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseMacroString() error = %v", err)
 			}
-			if got := m.expand(tt.env); got != tt.want {
+			got, err := m.expand(tt.env)
+			if err != nil {
+				t.Fatalf("expand() error = %v", err)
+			}
+			if got != tt.want {
 				t.Errorf("expand() got = %v, want %v", got, tt.want)
 			}
 		})
@@ -147,7 +151,10 @@ func TestMacroString_expandDomain_truncate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := m.expandDomain(env)
+	got, err := m.expandDomain(env)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got) > 253 {
 		t.Errorf("expandDomain() length = %d, want <= 253", len(got))
 	}

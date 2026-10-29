@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/foxcpp/go-mockdns"
@@ -109,5 +110,70 @@ func TestVerifier_senderWithoutLocalPart(t *testing.T) {
 				t.Errorf("incorrect result, want=%s, got=%s, err=%v", ResultPass, got, err)
 			}
 		})
+	}
+}
+
+// lookups are counted per check, so a resolver can be shared between checks
+func TestVerifier_sharedResolver(t *testing.T) {
+	resolver := &mockdns.Resolver{Zones: map[string]mockdns.Zone{
+		"example.com.": {
+			TXT: []string{"v=spf1 a a a a a a a a a a -all"},
+			A:   []string{"192.0.2.1"},
+		},
+	}}
+	for i := 0; i < 5; i++ {
+		v := NewVerifier("test@example.com", netip.MustParseAddr("192.0.2.1"), "example.net")
+		v.SetResolver(resolver)
+		if got, err := v.Test(context.TODO()); got != ResultPass {
+			t.Fatalf("check %d: incorrect result, want=%s, got=%s, err=%v", i, ResultPass, got, err)
+		}
+	}
+}
+
+func TestVerifier_SetLookupLimit(t *testing.T) {
+	resolver := &mockdns.Resolver{Zones: map[string]mockdns.Zone{
+		"example.com.": {
+			TXT: []string{"v=spf1 a:a.example.com a:b.example.com ip4:192.0.2.1 -all"},
+		},
+		"a.example.com.": {A: []string{"192.0.2.10"}},
+		"b.example.com.": {A: []string{"192.0.2.11"}},
+	}}
+	tests := []struct {
+		limit int
+		want  Result
+	}{
+		{1, ResultPermError},
+		{2, ResultPass},
+		{0, ResultPass}, // default
+	}
+	for _, tt := range tests {
+		v := NewVerifier("test@example.com", netip.MustParseAddr("192.0.2.1"), "example.net")
+		v.SetResolver(resolver)
+		v.SetLookupLimit(tt.limit)
+		if got, err := v.Test(context.TODO()); got != tt.want {
+			t.Errorf("limit %d: incorrect result, want=%s, got=%s, err=%v", tt.limit, tt.want, got, err)
+		}
+	}
+}
+
+func Test_isValidDomain(t *testing.T) {
+	tests := []struct {
+		domain string
+		want   bool
+	}{
+		{"example.com", true},
+		{"example.com.", true},
+		{"mail.example.com", true},
+		{"localhost", false},
+		{"", false},
+		{"a..example.com", false},
+		{".example.com", false},
+		{strings.Repeat("a", 64) + ".example.com", false},
+		{strings.Repeat("a", 63) + ".example.com", true},
+	}
+	for _, tt := range tests {
+		if got := isValidDomain(tt.domain); got != tt.want {
+			t.Errorf("isValidDomain(%q) = %v, want %v", tt.domain, got, tt.want)
+		}
 	}
 }

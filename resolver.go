@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"net/netip"
-	"sync/atomic"
 
 	"github.com/miekg/dns"
 )
@@ -27,105 +26,55 @@ type DNSResolver interface {
 	LookupAddr(ctx context.Context, addr string) ([]string, error)
 }
 
-// defaultMaxLookups is the total number of lookups during SPF evaluation
-// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.6.4
-const defaultMaxLookups = 10
-
-// LimitResolver is a DNSResolver that limits the number of DNS queries.
-// If this limit is exceeded return ResultPermError.
-// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.6.4
-// todo: implement "void lookups" limit
-type LimitResolver struct {
-	resolver DNSResolver
-	Limit    int32
-}
-
-var limitExceededAmount = NewCheckError(ResultPermError, "dns: query limit exceeded (amount)")
 var limitExceededDeadline = NewCheckError(ResultTempError, "dns: query limit exceeded (deadline)")
+var errInvalidDomain = NewCheckError(ResultPermError, "dns: invalid domain name")
 
-func (r *LimitResolver) increaseLookup(times int32) error {
-	now := atomic.AddInt32(&r.Limit, -times)
-	if now < 0 {
-		return limitExceededAmount
-	}
-	return nil
-}
-
-func (r *LimitResolver) wrapError(err error) error {
+// lookupError converts an error returned by DNSResolver into a *CheckError.
+// A name without records maps to ResultNone.
+func lookupError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if _, ok := err.(*CheckError); ok {
-		return err.(*CheckError)
+	var cErr *CheckError
+	if errors.As(err, &cErr) {
+		return cErr
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return limitExceededDeadline
 	}
-	dnsErr := new(net.DNSError)
-	if errors.As(err, &dnsErr) {
-		if dnsErr.Temporary() {
-			return NewCheckError(ResultTempError, "dns: "+dnsErr.Error())
-		}
-		if dnsErr.IsNotFound {
-			return NewCheckError(ResultNone, "dns: "+dnsErr.Error())
-		}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return NewCheckError(ResultNone, "dns: "+dnsErr.Error())
 	}
-	return WrapCheckError(err, ResultPermError, "dns: unexpected error")
-}
-func (r *LimitResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
-	if err := r.increaseLookup(1); err != nil {
-		return nil, err
-	}
-	if _, ok := dns.IsDomainName(name); !ok {
-		return nil, NewCheckError(ResultPermError, "dns: invalid domain name")
-	}
-	rs, err := r.resolver.LookupTXT(ctx, name)
-	return rs, r.wrapError(err)
+	// any other DNS failure is treated as transient
+	return WrapCheckError(err, ResultTempError, "dns: lookup failed")
 }
 
-func (r *LimitResolver) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
-	lookupTimes := int32(1)
-	if network == "ip" { // "ip" means both IPv4(A) and IPv6(AAAA)
-		lookupTimes = 2
+func (e *evaluation) lookupTXT(name string) ([]string, error) {
+	if _, ok := dns.IsDomainName(name); !ok {
+		return nil, errInvalidDomain
 	}
-	if err := r.increaseLookup(lookupTimes); err != nil {
-		return nil, err
-	}
+	rs, err := e.resolver.LookupTXT(e.ctx, name)
+	return rs, lookupError(err)
+}
+
+func (e *evaluation) lookupNetIP(network, host string) ([]netip.Addr, error) {
 	if _, ok := dns.IsDomainName(host); !ok {
-		return nil, NewCheckError(ResultPermError, "dns: invalid domain name")
+		return nil, errInvalidDomain
 	}
-	rs, err := r.resolver.LookupNetIP(ctx, network, host)
-	return rs, r.wrapError(err)
+	rs, err := e.resolver.LookupNetIP(e.ctx, network, host)
+	return rs, lookupError(err)
 }
 
-func (r *LimitResolver) LookupMX(ctx context.Context, name string) ([]*net.MX, error) {
-	if err := r.increaseLookup(1); err != nil {
-		return nil, err
-	}
+func (e *evaluation) lookupMX(name string) ([]*net.MX, error) {
 	if _, ok := dns.IsDomainName(name); !ok {
-		return nil, NewCheckError(ResultPermError, "dns: invalid domain name")
+		return nil, errInvalidDomain
 	}
-	rs, err := r.resolver.LookupMX(ctx, name)
-	return rs, r.wrapError(err)
+	rs, err := e.resolver.LookupMX(e.ctx, name)
+	return rs, lookupError(err)
 }
 
-func (r *LimitResolver) LookupAddr(ctx context.Context, addr string) ([]string, error) {
-	if err := r.increaseLookup(1); err != nil {
-		return nil, err
-	}
-	if _, err := netip.ParseAddr(addr); err != nil {
-		return nil, NewCheckError(ResultPermError, "dns: invalid IP address")
-	}
-	rs, err := r.resolver.LookupAddr(ctx, addr)
-	return rs, r.wrapError(err)
-}
-
-func NewLimitResolver(dns DNSResolver, limit int) *LimitResolver {
-	if limit <= 0 {
-		limit = defaultMaxLookups
-	}
-	return &LimitResolver{
-		resolver: dns,
-		Limit:    int32(limit),
-	}
+func (e *evaluation) lookupAddr(addr netip.Addr) ([]string, error) {
+	rs, err := e.resolver.LookupAddr(e.ctx, addr.String())
+	return rs, lookupError(err)
 }
