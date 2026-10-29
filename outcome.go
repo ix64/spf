@@ -46,7 +46,7 @@ type Outcome struct {
 // ref: https://datatracker.ietf.org/doc/html/rfc7208#section-9.1
 func (o *Outcome) ReceivedSPF() string {
 	var sb strings.Builder
-	sb.WriteString(string(o.Result))
+	sb.WriteString(replaceControl(string(o.Result)))
 	sb.WriteString(" (")
 	if o.Receiver != "" {
 		sb.WriteString(escapeComment(o.Receiver))
@@ -105,15 +105,28 @@ func (o *Outcome) comment() string {
 	}
 }
 
+// replaceControl replaces control characters with "?". Comments and
+// quoted-strings can't hold them, and a CR or LF taken from the MAIL FROM,
+// HELO or an error would end the header field, letting it inject others.
+func replaceControl(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, s)
+}
+
 // escapeComment escapes the characters that are special in a comment.
 // ref: https://datatracker.ietf.org/doc/html/rfc5322#section-3.2.2
 func escapeComment(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `(`, `\(`, `)`, `\)`).Replace(s)
+	return strings.NewReplacer(`\`, `\\`, `(`, `\(`, `)`, `\)`).Replace(replaceControl(s))
 }
 
 // headerValue returns s as a dot-atom if possible, else as a quoted-string.
 // ref: https://datatracker.ietf.org/doc/html/rfc5322#section-3.2.3
 func headerValue(s string) string {
+	s = replaceControl(s)
 	if isDotAtom(s) {
 		return s
 	}
