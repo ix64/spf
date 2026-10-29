@@ -124,6 +124,21 @@ func TestOutcome_ReceivedSPF(t *testing.T) {
 				` problem="invalid term \"a:(x)\"";`,
 		},
 		{
+			// CR and LF must not end the header field
+			"control characters",
+			Outcome{
+				Result:   ResultFail,
+				Identity: IdentityMailFrom,
+				Sender:   "a\r\nX-Injected: 1@example.com",
+				MailFrom: "a\r\nX-Injected: 1@example.com",
+				ClientIP: netip.MustParseAddr("192.0.2.1"),
+				Helo:     "mail.example.com\nX-Injected: 2",
+			},
+			`fail (domain of a??X-Injected: 1@example.com does not designate 192.0.2.1 as permitted sender)` +
+				` client-ip=192.0.2.1; envelope-from="a??X-Injected: 1@example.com";` +
+				` helo="mail.example.com?X-Injected: 2"; identity=mailfrom;`,
+		},
+		{
 			"comment escaping",
 			Outcome{
 				Result:   ResultNone,
