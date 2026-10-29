@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         # minimum version from go.mod, and the latest stable release
-        go: ["1.22.x", "stable"]
+        go: ["1.24.x", "stable"]
     env:
       GOTOOLCHAIN: local
     steps:

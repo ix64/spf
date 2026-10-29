@@ -1,10 +1,13 @@
 package spf
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/netip"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/foxcpp/go-mockdns"
@@ -169,4 +172,39 @@ func Test_parseExplanation(t *testing.T) {
 	if _, err := parseExplanation("caf\xc3\xa9"); err == nil {
 		t.Error("parseExplanation() expected error for non-ASCII text")
 	}
+}
+
+func TestVerifier_SetLogger(t *testing.T) {
+	resolver := &mockdns.Resolver{Zones: map[string]mockdns.Zone{
+		"example.com.": {
+			TXT: []string{"v=spf1 redirect=_spf.example.com"},
+		},
+		"_spf.example.com.": {
+			TXT: []string{"v=spf1 ip4:192.0.2.0/24 -all"},
+		},
+	}}
+	var buf bytes.Buffer
+	v := NewVerifier("user@example.com", netip.MustParseAddr("198.51.100.1"), "helo.example.org")
+	v.SetResolver(resolver)
+	v.SetLogger(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	v.Check(context.TODO())
+
+	for _, want := range []string{
+		`msg="spf: record" domain=example.com record="v=spf1 redirect=_spf.example.com"`,
+		`msg="spf: redirect" domain=example.com target=_spf.example.com`,
+		`msg="spf: mechanism" domain=_spf.example.com mechanism=ip4:192.0.2.0/24 matched=false`,
+		`msg="spf: mechanism" domain=_spf.example.com mechanism=-all matched=true`,
+		`msg="spf: result" identity=mailfrom sender=user@example.com ip=198.51.100.1 result=fail mechanism=-all`,
+	} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("log does not contain %s\nlog:\n%s", want, buf.String())
+		}
+	}
+	if strings.Contains(buf.String(), "error=") {
+		t.Errorf("log contains an empty error attribute:\n%s", buf.String())
+	}
+
+	// a nil logger disables logging
+	v.SetLogger(nil)
+	v.Check(context.TODO())
 }
