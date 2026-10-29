@@ -26,5 +26,6 @@
 // Parse parses an SPF record without any DNS lookups, e.g. to validate a
 // record before publishing it.
 //
-// The implementation passes the RFC 7208 test suite of the OpenSPF project.
+// The implementation passes the RFC 7208 test suite of the OpenSPF project,
+// as maintained by pyspf.
 package spf

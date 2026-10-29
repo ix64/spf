@@ -1,7 +1,9 @@
 # Go SPF Validator
 
 - Implements [RFC 7208](https://datatracker.ietf.org/doc/html/rfc7208), passing all cases of the
-  [RFC 7208 test suite](testdata/openspf-rfc7208-tests.yml)
+  [RFC 7208 test suite](testdata/pyspf-rfc7208-tests.yml) of the OpenSPF project, as maintained
+  by [pyspf](https://github.com/sdgathman/pyspf), and pyspf's [own tests](testdata/pyspf-tests.yml)
+  except two for a modifier of SPF drafts
 - Checks both the MAIL FROM and HELO identities, with `exp=` explanations
   and `Received-SPF` headers
 - Supports Go 1.24+
