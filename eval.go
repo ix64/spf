@@ -42,6 +42,7 @@ var limitExceededVoid = wrapCheckError(ErrTooManyVoidLookups, ResultPermError, "
 var limitExceededMX = wrapCheckError(ErrTooManyMX, ResultPermError, "")
 
 // resultOf returns the SPF result carried by err.
+// Every error leading to a result is a *checkError, so the fallback is never used.
 func resultOf(err error) Result {
 	var cErr *checkError
 	if errors.As(err, &cErr) {
@@ -50,15 +51,12 @@ func resultOf(err error) Result {
 	return ResultPermError
 }
 
-// isNotFound reports whether err means the queried name has no records.
-func isNotFound(err error) bool {
-	return resultOf(err) == ResultNone
-}
-
-// isLimitExceeded reports whether err means the evaluation must stop.
-func isLimitExceeded(err error) bool {
+// stopsEvaluation reports whether err must end the evaluation, even where
+// DNS errors are otherwise ignored, like in "ptr".
+func stopsEvaluation(err error) bool {
 	return errors.Is(err, ErrTooManyLookups) ||
 		errors.Is(err, ErrTooManyVoidLookups) ||
+		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded)
 }
 
@@ -173,7 +171,10 @@ func (e *evaluation) checkHost(domain string) (Result, error) {
 		// if no SPF record is found, or if the <target-name> is malformed,
 		// the result is a "permerror" rather than "none".
 		if result == ResultNone {
-			return ResultPermError, fmt.Errorf("spf: record not found on redirect host: %s", target)
+			return ResultPermError, wrapCheckError(ErrNoRecord, ResultPermError, "redirect="+target)
+		}
+		if err != nil {
+			err = wrapCheckError(err, result, "redirect="+target)
 		}
 		return result, err
 	}
@@ -204,7 +205,7 @@ func (e *evaluation) lookupRecord(domain string) (*Record, error) {
 	case 1:
 		rec, err := Parse(records[0])
 		if err != nil {
-			return nil, wrapCheckError(err, ResultPermError, "invalid record on "+domain)
+			return nil, wrapCheckError(err, ResultPermError, domain)
 		}
 		return rec, nil
 	default:
@@ -279,11 +280,11 @@ func (e *evaluation) matchInclude(host string) (bool, error) {
 	case ResultFail, ResultSoftFail, ResultNeutral:
 		return false, nil
 	case ResultTempError:
-		return false, wrapCheckError(err, ResultTempError, "check include host failed")
+		return false, wrapCheckError(err, ResultTempError, "include:"+host)
 	case ResultNone:
-		return false, newCheckError(ResultPermError, "include host has no record: "+host)
+		return false, wrapCheckError(ErrNoRecord, ResultPermError, "include:"+host)
 	default:
-		return false, wrapCheckError(err, ResultPermError, "check include host failed")
+		return false, wrapCheckError(err, ResultPermError, "include:"+host)
 	}
 }
 
@@ -392,7 +393,7 @@ func (e *evaluation) matchPTR(target string) (bool, error) {
 func (e *evaluation) validatedNames(want func(name string) bool) ([]string, error) {
 	names, err := e.lookupAddr(e.ip)
 	if void, err := e.checkVoid(len(names), err); void || err != nil {
-		if isLimitExceeded(err) {
+		if stopsEvaluation(err) {
 			return nil, err
 		}
 		return nil, nil
@@ -408,7 +409,7 @@ func (e *evaluation) validatedNames(want func(name string) bool) ([]string, erro
 		}
 		addrs, err := e.lookupAddrs(name)
 		if void, err := e.checkVoid(len(addrs), err); void || err != nil {
-			if isLimitExceeded(err) {
+			if stopsEvaluation(err) {
 				return nil, err
 			}
 			continue

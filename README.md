@@ -40,9 +40,10 @@ checker := &spf.Checker{
 o := checker.CheckMailFrom(ctx, ip, mailFrom, helo)
 ```
 
-`Outcome.Problem` explains a `temperror` or `permerror`, and can be matched with `errors.Is`
-against `spf.ErrTooManyLookups`, `spf.ErrTooManyVoidLookups`, `spf.ErrTooManyMX`,
-`spf.ErrMultipleRecords` or `context.DeadlineExceeded`.
+`Outcome.Problem` explains a `temperror` or `permerror`, naming each `include` and `redirect`
+on the way to the cause. It can be matched with `errors.Is` against `spf.ErrTooManyLookups`,
+`spf.ErrTooManyVoidLookups`, `spf.ErrTooManyMX`, `spf.ErrMultipleRecords`, `spf.ErrNoRecord`,
+`context.DeadlineExceeded` or `context.Canceled`.
 
 `Parse` parses a record without any DNS lookups, e.g. to validate an SPF record before publishing it:
 
