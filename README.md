@@ -6,9 +6,17 @@
   and `Received-SPF` headers
 - Supports Go 1.24+
 
+## Install
+
+```bash
+go get github.com/ix64/spf
+```
+
 ## Usage
 
 ```go
+import "github.com/ix64/spf"
+
 v := spf.NewVerifier("user@example.com", netip.MustParseAddr("192.0.2.1"), "mail.example.com")
 v.SetReceiver("mx.example.net") // optional, for %{r} and Received-SPF
 

@@ -1,4 +1,4 @@
-module go.u233.dev/spf
+module github.com/ix64/spf
 
 go 1.24.0
 
