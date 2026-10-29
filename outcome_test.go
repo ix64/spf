@@ -91,6 +91,8 @@ func TestOutcome_ReceivedSPF(t *testing.T) {
 	}{
 		{
 			// https://datatracker.ietf.org/doc/html/rfc7208#section-9.1
+			// The mechanism is quoted, unlike in the RFC, since it's not a dot-atom.
+			// ref: https://www.rfc-editor.org/errata/eid5843
 			"RFC example",
 			Outcome{
 				Result:    ResultPass,
