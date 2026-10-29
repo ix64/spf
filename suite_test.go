@@ -198,7 +198,8 @@ func TestVerifier_Test(t *testing.T) {
 				t.Run(tName, func(t *testing.T) {
 					v := NewVerifier(tt.MailFrom, netip.MustParseAddr(tt.Host), tt.Helo)
 					v.SetResolver(lowerCaseResolver{r})
-					got, err := v.Test(context.TODO())
+					o := v.Check(context.TODO())
+					got, err := o.Result, o.Problem
 
 					isOneOfExpect := false
 					for _, result := range tt.Result {
@@ -207,18 +208,30 @@ func TestVerifier_Test(t *testing.T) {
 							break
 						}
 					}
+					// "DEFAULT" means no explanation from "exp". The suite writes
+					// IPv6 nibbles in upper case, so compare case-insensitively.
+					wantExp := tt.Explanation
+					if wantExp == "DEFAULT" {
+						wantExp = ""
+					}
+					expOK := tt.Explanation == "" || strings.EqualFold(o.Explanation, wantExp)
 
 					key := suite.Description + "/" + tName
 					if knownFailures[key] {
-						if isOneOfExpect {
+						if isOneOfExpect && expOK {
 							t.Errorf("known failure now passes, remove %q from knownFailures", key)
 						} else {
-							t.Skipf("known failure: wants %v, got %s", tt.Result, got)
+							t.Skipf("known failure: wants %v %q, got %s %q", tt.Result, wantExp, got, o.Explanation)
 						}
 						return
 					}
 					if !isOneOfExpect {
 						t.Errorf("wants %v, got %s", tt.Result, got)
+					}
+					if !expOK {
+						t.Errorf("wants explanation %q, got %q", wantExp, o.Explanation)
+					}
+					if t.Failed() {
 						if err != nil {
 							t.Log(err)
 						}

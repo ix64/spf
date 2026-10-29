@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // MacroString is a parsed macro-string or domain-spec.
@@ -35,12 +36,30 @@ func (m MacroString) String() string {
 
 // macroLetters are the macro-letters allowed in a domain-spec.
 // "c", "r" and "t" are only allowed in an explanation string.
-const macroLetters = "slodiphv"
+const (
+	macroLetters    = "slodiphv"
+	expMacroLetters = macroLetters + "crt"
+)
 
 const macroDelimiters = ".-+,/_="
 
 // parseMacroString parses a macro-string.
 func parseMacroString(s string) (MacroString, error) {
+	return parseMacro(s, false)
+}
+
+// parseExplanation parses an explanation string from the TXT record of "exp".
+// explain-string = *( macro-string / SP )
+// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-6.2
+func parseExplanation(s string) (MacroString, error) {
+	return parseMacro(s, true)
+}
+
+func parseMacro(s string, explanation bool) (MacroString, error) {
+	letters := macroLetters
+	if explanation {
+		letters = expMacroLetters
+	}
 	m := MacroString{raw: s}
 	var literal strings.Builder
 	flush := func() {
@@ -54,7 +73,7 @@ func parseMacroString(s string) (MacroString, error) {
 		c := s[i]
 		if c != '%' {
 			// macro-literal = %x21-24 / %x26-7E
-			if c < 0x21 || c > 0x7e {
+			if (c < 0x21 || c > 0x7e) && !(explanation && c == ' ') {
 				return MacroString{}, fmt.Errorf("invalid character %q in macro-string", c)
 			}
 			literal.WriteByte(c)
@@ -77,7 +96,7 @@ func parseMacroString(s string) (MacroString, error) {
 			if end < 0 {
 				return MacroString{}, errors.New("unterminated macro-expand")
 			}
-			part, err := parseMacroExpand(s[i+1 : i+end])
+			part, err := parseMacroExpand(s[i+1:i+end], letters)
 			if err != nil {
 				return MacroString{}, err
 			}
@@ -94,13 +113,13 @@ func parseMacroString(s string) (MacroString, error) {
 
 // parseMacroExpand parses the content between "%{" and "}".
 // macro-letter transformers *delimiter
-func parseMacroExpand(s string) (macroPart, error) {
+func parseMacroExpand(s, letters string) (macroPart, error) {
 	if s == "" {
 		return macroPart{}, errors.New("empty macro-expand")
 	}
 	letter := s[0]
 	part := macroPart{letter: letter | 0x20}
-	if strings.IndexByte(macroLetters, part.letter) < 0 {
+	if strings.IndexByte(letters, part.letter) < 0 {
 		return macroPart{}, fmt.Errorf("invalid macro-letter %q", letter)
 	}
 	part.escape = letter >= 'A' && letter <= 'Z'
@@ -185,6 +204,8 @@ type macroEnv struct {
 	domain       string // <domain> currently being checked
 	ip           netip.Addr
 	helloDomain  string
+	receiver     string    // domain name of the host performing the check
+	now          time.Time // for %{t}
 
 	// validatedName returns the value of %{p}, nil means "unknown".
 	validatedName func() (string, error)
@@ -256,6 +277,15 @@ func (p macroPart) expand(env *macroEnv) (string, error) {
 		}
 	case 'h':
 		value = env.helloDomain
+	case 'c':
+		value = env.ip.String()
+	case 'r':
+		value = env.receiver
+		if value == "" {
+			value = "unknown"
+		}
+	case 't':
+		value = strconv.FormatInt(env.now.Unix(), 10)
 	}
 
 	if p.delims != "" {
