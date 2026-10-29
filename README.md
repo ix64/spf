@@ -39,7 +39,7 @@ To change the settings, create a `Checker` once and share it; it's safe for conc
 checker := &spf.Checker{
 	Resolver: resolver,         // net.DefaultResolver if nil
 	Receiver: "mx.example.net", // for %{r} and Received-SPF
-	Logger:   slog.Default(),   // logs each step at debug level
+	Logger:   slog.Default(),   // results at info level, steps and DNS lookups at debug
 }
 o := checker.CheckMailFrom(ctx, ip, mailFrom, helo)
 ```

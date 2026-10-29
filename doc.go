@@ -16,8 +16,8 @@
 //
 // CheckMailFrom and CheckHelo use the zero Checker, i.e. the system resolver
 // and the default limits. To use another resolver, set the receiver name or
-// log the steps of each check, create a Checker once and share it; it is
-// safe for concurrent use.
+// log the checks, create a Checker once and share it; it is safe for
+// concurrent use.
 //
 // The Outcome of a check holds the Result, the mechanism that produced it,
 // the domain's explanation of a ResultFail, and the Problem behind a

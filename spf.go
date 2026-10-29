@@ -74,7 +74,9 @@ type Checker struct {
 	// ref: https://datatracker.ietf.org/doc/html/rfc7208#section-4.6.4
 	Timeout time.Duration
 
-	// Logger logs the steps of each check at debug level, nothing is logged if nil.
+	// Logger logs the result of each check at info level, and its steps and
+	// DNS lookups at debug level. Every event has the "identity", "sender"
+	// and "ip" of the check. Nothing is logged if nil.
 	Logger *slog.Logger
 }
 
@@ -178,6 +180,7 @@ type check struct {
 	lookupLimit int
 	timeout     time.Duration
 	logger      *slog.Logger
+	logSteps    bool // debug level is enabled, guards building debug events
 }
 
 func (c *Checker) newCheck(ip netip.Addr, mailFrom, helo, senderLocal, senderDomain string) *check {
@@ -221,9 +224,15 @@ func (ch *check) run(ctx context.Context, identity Identity) *Outcome {
 		Helo:     ch.helloDomain,
 		Receiver: ch.receiver,
 	}
+	// tag every event of the check, only when something is logged
+	if ch.logger.Enabled(ctx, slog.LevelInfo) {
+		ch.logger = ch.logger.With("identity", string(identity), "sender", ch.sender, "ip", ch.ip.String())
+	}
+	ch.logSteps = ch.logger.Enabled(ctx, slog.LevelDebug)
+
 	// a HELO with an address literal is not a valid domain either
 	if !isValidDomain(ch.senderDomain) {
-		ch.logResult(ctx, o)
+		ch.logResult(ctx, o, nil)
 		return o
 	}
 
@@ -235,14 +244,29 @@ func (ch *check) run(ctx context.Context, identity Identity) *Outcome {
 	if o.Result == ResultFail {
 		o.Explanation = e.explanation
 	}
-	ch.logResult(ctx, o)
+	ch.logResult(ctx, o, e)
 	return o
 }
 
-func (ch *check) logResult(ctx context.Context, o *Outcome) {
-	ch.logger.DebugContext(ctx, "spf: result",
-		"identity", string(o.Identity), "sender", o.Sender, "ip", o.ClientIP.String(),
-		"result", string(o.Result), "mechanism", o.Mechanism, errAttr(o.Problem))
+// logResult logs the outcome, and the lookups used by e if it's not nil.
+func (ch *check) logResult(ctx context.Context, o *Outcome, e *evaluation) {
+	if !ch.logger.Enabled(ctx, slog.LevelInfo) {
+		return
+	}
+	attrs := []slog.Attr{slog.String("result", string(o.Result))}
+	if o.Mechanism != "" {
+		attrs = append(attrs, slog.String("mechanism", o.Mechanism))
+	}
+	if o.Explanation != "" {
+		attrs = append(attrs, slog.String("explanation", o.Explanation))
+	}
+	if e != nil {
+		attrs = append(attrs, slog.Int("lookups", e.lookups), slog.Int("void_lookups", e.voidLookups))
+	}
+	if o.Problem != nil {
+		attrs = append(attrs, slog.Any("error", o.Problem))
+	}
+	ch.logger.LogAttrs(ctx, slog.LevelInfo, "spf: result", attrs...)
 }
 
 // isValidDomain reports whether domain is a well-formed multi-label domain name,

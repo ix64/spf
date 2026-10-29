@@ -33,7 +33,7 @@ func ExampleChecker() {
 		Resolver: &net.Resolver{PreferGo: true},
 		Receiver: "mx.example.net",
 		Timeout:  10 * time.Second,
-		Logger:   slog.Default(),
+		Logger:   slog.Default(), // logs the result of each check
 	}
 
 	ctx := context.Background()
