@@ -325,3 +325,34 @@ func TestChecker_problemMessage(t *testing.T) {
 		}
 	}
 }
+
+func Test_isDomainName(t *testing.T) {
+	label63 := strings.Repeat("a", 63)
+	name253 := strings.Join([]string{label63, label63, label63, strings.Repeat("b", 61)}, ".")
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"example.com", true},
+		{"example.com.", true},
+		{"localhost", true},
+		{".", true},
+		{"a b.example.com", true}, // DNS allows any octet
+		{"_spf.example.com", true},
+		{label63 + ".com", true},
+		{name253, true},
+		{name253 + ".", true},
+
+		{"", false},
+		{"..", false},
+		{".example.com", false},
+		{"a..example.com", false},
+		{strings.Repeat("a", 64) + ".com", false},
+		{name253 + "b", false},
+	}
+	for _, tt := range tests {
+		if got := isDomainName(tt.name); got != tt.want {
+			t.Errorf("isDomainName(%q) = %v, want %v (len %d)", tt.name, got, tt.want, len(tt.name))
+		}
+	}
+}
