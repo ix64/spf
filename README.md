@@ -8,7 +8,7 @@
   and `Received-SPF` headers
 - Accepts internationalized domain names, converted to A-labels per
   [RFC 8616](https://datatracker.ietf.org/doc/html/rfc8616)
-- Supports Go 1.24+
+- Supports Go 1.25+
 
 ## Install
 
