@@ -73,7 +73,7 @@ func parseMacro(s string, explanation bool) (MacroString, error) {
 		c := s[i]
 		if c != '%' {
 			// macro-literal = %x21-24 / %x26-7E
-			if (c < 0x21 || c > 0x7e) && !(explanation && c == ' ') {
+			if (c < 0x21 || c > 0x7e) && (!explanation || c != ' ') {
 				return MacroString{}, fmt.Errorf("invalid character %q in macro-string", c)
 			}
 			literal.WriteByte(c)
