@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"time"
 )
 
 // Resolver looks up the DNS records used by SPF. *net.Resolver implements it.
+// Names are given fully qualified, with a trailing dot.
 //
 // Like net.Resolver, a name that doesn't exist or has no records of the
 // type must be reported as a *net.DNSError with IsNotFound set; any other
@@ -58,6 +60,16 @@ func (e *evaluation) beforeLookup(name string) error {
 	return nil
 }
 
+// rooted returns name with a trailing dot, so that the resolver looks up
+// only the name itself, without appending the search domains of the
+// system's resolver configuration.
+func rooted(name string) string {
+	if strings.HasSuffix(name, ".") {
+		return name
+	}
+	return name + "."
+}
+
 // lookupError classifies an error returned by the Resolver.
 func (e *evaluation) lookupError(err error) error {
 	if err == nil {
@@ -104,7 +116,7 @@ func (e *evaluation) lookupTXT(name string) ([]string, error) {
 		return nil, err
 	}
 	start := e.lookupStart()
-	rs, err := e.resolver.LookupTXT(e.ctx, name)
+	rs, err := e.resolver.LookupTXT(e.ctx, rooted(name))
 	err = e.lookupError(err)
 	e.logLookup("TXT", name, len(rs), err, start)
 	return rs, err
@@ -115,7 +127,7 @@ func (e *evaluation) lookupNetIP(network, host string) ([]netip.Addr, error) {
 		return nil, err
 	}
 	start := e.lookupStart()
-	rs, err := e.resolver.LookupNetIP(e.ctx, network, host)
+	rs, err := e.resolver.LookupNetIP(e.ctx, network, rooted(host))
 	err = e.lookupError(err)
 	typ := "AAAA"
 	if network == "ip4" {
@@ -130,7 +142,7 @@ func (e *evaluation) lookupMX(name string) ([]*net.MX, error) {
 		return nil, err
 	}
 	start := e.lookupStart()
-	rs, err := e.resolver.LookupMX(e.ctx, name)
+	rs, err := e.resolver.LookupMX(e.ctx, rooted(name))
 	err = e.lookupError(err)
 	e.logLookup("MX", name, len(rs), err, start)
 	return rs, err

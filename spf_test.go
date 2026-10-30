@@ -374,6 +374,39 @@ func (r *recordingResolver) LookupNetIP(ctx context.Context, network, host strin
 	return r.Resolver.LookupNetIP(ctx, network, host)
 }
 
+func (r *recordingResolver) LookupMX(ctx context.Context, name string) ([]*net.MX, error) {
+	r.names = append(r.names, name)
+	return r.Resolver.LookupMX(ctx, name)
+}
+
+// names are looked up with a trailing dot, so the system resolver doesn't
+// append its search domains
+func TestChecker_rootedNames(t *testing.T) {
+	r := &recordingResolver{Resolver: &mockdns.Resolver{Zones: map[string]mockdns.Zone{
+		"example.com.": {
+			TXT: []string{"v=spf1 include:inc.example.com a mx exists:%{i}.ex.example.com redirect=red.example.com"},
+			A:   []string{"192.0.2.10"},
+			MX:  []net.MX{{Host: "mx.example.com", Pref: 10}},
+		},
+		"inc.example.com.": {TXT: []string{"v=spf1 -all"}},
+		"mx.example.com.":  {A: []string{"192.0.2.11"}},
+		"red.example.com.": {TXT: []string{"v=spf1 -all exp=exp.example.com"}},
+		"exp.example.com.": {TXT: []string{"denied"}},
+	}}}
+	c := &Checker{Resolver: r}
+	o := c.CheckMailFrom(context.TODO(), netip.MustParseAddr("192.0.2.1"), "user@example.com", "mail.example.com")
+	if o.Result != ResultFail || o.Explanation != "denied" {
+		t.Errorf("got (%s, %q), want (fail, %q), problem: %v", o.Result, o.Explanation, "denied", o.Problem)
+	}
+	want := []string{
+		"example.com.", "inc.example.com.", "example.com.", "example.com.", "mx.example.com.",
+		"192.0.2.1.ex.example.com.", "red.example.com.", "exp.example.com.",
+	}
+	if strings.Join(r.names, " ") != strings.Join(want, " ") {
+		t.Errorf("looked up %q, want %q", r.names, want)
+	}
+}
+
 // internationalized domains are checked with A-labels, and terms with a
 // non-ASCII local-part do not match
 // ref: https://datatracker.ietf.org/doc/html/rfc8616#section-4
