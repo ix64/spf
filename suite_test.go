@@ -91,13 +91,13 @@ func (t *testZoneRecord) UnmarshalYAML(unmarshal func(interface{}) error) error 
 		return err
 	}
 	for _, item := range items {
-		switch item.(type) {
+		switch item := item.(type) {
 		case string:
-			if item.(string) == "TIMEOUT" {
+			if item == "TIMEOUT" {
 				t.timeout = true
 			}
 		case map[interface{}]interface{}:
-			if err := t.fillByMap(item.(map[interface{}]interface{})); err != nil {
+			if err := t.fillByMap(item); err != nil {
 				return err
 			}
 		default:
@@ -156,12 +156,12 @@ func (t *testZoneRecord) fillByMap(m map[interface{}]interface{}) error {
 	return nil
 }
 func parseRecordValue(i interface{}) (string, error) {
-	switch i.(type) {
+	switch i := i.(type) {
 	case string:
-		return i.(string), nil
+		return i, nil
 	case []interface{}:
 		var val string
-		for _, v := range i.([]interface{}) {
+		for _, v := range i {
 			if vv, ok := v.(string); ok {
 				val += vv
 			} else {
